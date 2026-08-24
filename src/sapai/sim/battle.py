@@ -152,18 +152,13 @@ class BattleSimulator:
                 and not self._uses_vanilla_fallback(pet)
             }
         )
-        supported_perks = self.rules.data["perks"]
-        unsupported_perks = sorted(
-            {
-                pet.perk
-                for pet in team.slots
-                if pet is not None and pet.perk and pet.perk not in supported_perks
-            }
-        )
-        if unsupported_pets or unsupported_perks:
+        for pet in team.slots:
+            if pet is not None and pet.perk and pet.perk not in self.rules.supported_perks:
+                pet.metadata.setdefault("perk_fallback", "unsupported_rulebook_perk")
+        if unsupported_pets:
             raise UnsupportedRuleError(
                 "training board contains unsupported rules: "
-                f"pets={unsupported_pets}, perks={unsupported_perks}"
+                f"pets={unsupported_pets}, perks=[]"
             )
 
     def _uses_vanilla_fallback(self, pet: Pet) -> bool:

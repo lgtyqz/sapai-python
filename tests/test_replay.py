@@ -75,6 +75,38 @@ class ReplayParserTest(unittest.TestCase):
         self.assertEqual(pet.metadata["vanilla_fallback"], "unknown_pet_id")
         BattleSimulator(catalog()).assert_team_supported(board.team)
 
+    def test_perk_zero_and_unknown_perk_ids_are_not_dropped(self):
+        battle = {
+            "UserBoard": {
+                "Pack": 0,
+                "Tur": 2,
+                "Mins": {
+                    "Items": [
+                        {
+                            "Enu": 0,
+                            "Perk": 0,
+                            "Poi": {"x": 4},
+                            "At": {"Perm": 2},
+                            "Hp": {"Perm": 2},
+                        },
+                        {
+                            "Enu": 0,
+                            "Perk": 999_999,
+                            "Poi": {"x": 3},
+                            "At": {"Perm": 2},
+                            "Hp": {"Perm": 2},
+                        },
+                    ]
+                },
+            },
+            "OpponentBoard": {"Pack": 0, "Tur": 2, "Mins": {"Items": []}},
+        }
+        team = ReplayParser(catalog()).parse_battle(battle)[0].team
+        self.assertEqual(team.slots[0].perk, "Coconut")
+        self.assertEqual(team.slots[1].perk, "Perk #999999")
+        BattleSimulator(catalog()).assert_team_supported(team)
+        self.assertEqual(team.slots[1].metadata["perk_fallback"], "unknown_perk_id")
+
 
 if __name__ == "__main__":
     unittest.main()

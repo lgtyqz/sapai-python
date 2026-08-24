@@ -24,6 +24,8 @@ class RuleBookTest(unittest.TestCase):
         self.assertEqual(rules.generated_pets, turtle_tokens)
         self.assertEqual(rules.supported_pets, turtle_names | turtle_tokens)
         self.assertIn("Pizza", rules.supported_foods)
+        self.assertIn("Coconut", rules.supported_perks)
+        self.assertNotIn("Silly", rules.supported_perks)
 
     def test_expression_language_is_small_and_deterministic(self):
         value = evaluate({"ceil": {"mul": ["attack", 0.5, "level"]}}, {"attack": 5, "level": 2})

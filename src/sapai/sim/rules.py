@@ -160,6 +160,10 @@ class RuleBook:
     def supported_foods(self) -> frozenset[str]:
         return frozenset(self.data["foods"])
 
+    @property
+    def supported_perks(self) -> frozenset[str]:
+        return frozenset(self.data["perks"])
+
     def pet_definition(self, name: str) -> Mapping[str, Any]:
         return self.data["pets"].get(name, {})
 

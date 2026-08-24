@@ -87,6 +87,28 @@ class DatasetWorkflowTest(unittest.TestCase):
         self.assertEqual(pet.metadata["vanilla_fallback"], "unknown_pet_id")
         BattleSimulator(catalog()).assert_team_supported(team)
 
+    def test_old_serialized_unknown_perk_is_inferred_as_fallback(self):
+        team = team_from_dict(
+            [
+                {
+                    "id": 0,
+                    "name": "Ant",
+                    "tier": 1,
+                    "attack": 2,
+                    "health": 2,
+                    "perk": "Perk #999999",
+                },
+                None,
+                None,
+                None,
+                None,
+            ]
+        )
+        pet = team.slots[0]
+        self.assertIsNotNone(pet)
+        self.assertEqual(pet.metadata["perk_fallback"], "unknown_perk_id")
+        BattleSimulator(catalog()).assert_team_supported(team)
+
     def test_board_json_round_trip_and_replay_safe_split(self):
         ant = catalog().pet_by_name("Ant").create()
         boards = [

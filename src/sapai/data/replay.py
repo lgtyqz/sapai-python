@@ -117,8 +117,16 @@ class ReplayParser:
         spec = self.catalog.pets.get(pet_id)
         attack = raw.get("At", {})
         health = raw.get("Hp", {})
-        perk_id = raw.get("Perk")
+        raw_perk_id = raw.get("Perk")
         metadata = {} if spec else {"vanilla_fallback": "unknown_pet_id"}
+        perk = None
+        if raw_perk_id is not None:
+            perk_id = int(raw_perk_id)
+            if perk_id >= 0:
+                perk = self.catalog.perks.get(perk_id)
+                if perk is None:
+                    perk = f"Perk #{perk_id}"
+                    metadata["perk_fallback"] = "unknown_perk_id"
         pet = Pet(
             id=pet_id,
             name=spec.name if spec else f"Pet #{pet_id}",
@@ -126,7 +134,7 @@ class ReplayParser:
             attack=int(attack.get("Perm", 0)) + int(attack.get("Temp", 0)),
             health=int(health.get("Perm", 0)) + int(health.get("Temp", 0)),
             experience=int(raw.get("Exp", 0)),
-            perk=self.catalog.perks.get(int(perk_id)) if perk_id else None,
+            perk=perk,
             mana=int(raw.get("Mana", 0)),
             triggers_consumed=self._triggers_consumed(raw),
             metadata=metadata,

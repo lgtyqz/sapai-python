@@ -36,6 +36,9 @@ def pet_from_dict(value: Mapping[str, Any]) -> Pet:
     metadata = dict(value.get("metadata", {}))
     if pet_id >= 0 and name == f"Pet #{pet_id}":
         metadata.setdefault("vanilla_fallback", "unknown_pet_id")
+    perk = value.get("perk")
+    if isinstance(perk, str) and perk.startswith("Perk #"):
+        metadata.setdefault("perk_fallback", "unknown_perk_id")
     return Pet(
         id=pet_id,
         name=name,
@@ -43,7 +46,7 @@ def pet_from_dict(value: Mapping[str, Any]) -> Pet:
         attack=int(value["attack"]),
         health=int(value["health"]),
         experience=int(value.get("experience", 0)),
-        perk=value.get("perk"),
+        perk=perk,
         mana=int(value.get("mana", 0)),
         temporary_attack=int(value.get("temporary_attack", 0)),
         temporary_health=int(value.get("temporary_health", 0)),

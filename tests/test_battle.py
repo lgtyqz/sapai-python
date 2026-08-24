@@ -72,6 +72,12 @@ class BattleSimulatorTest(unittest.TestCase):
         with self.assertRaises(UnsupportedRuleError):
             self.simulator.assert_team_supported(Team.from_pets([butterfly]))
 
+    def test_unsupported_perk_uses_tagged_no_effect_fallback(self):
+        otter = self.catalog.pet_by_name("Otter").create()
+        otter.perk = "Silly"
+        self.simulator.assert_team_supported(Team.from_pets([otter]))
+        self.assertEqual(otter.metadata["perk_fallback"], "unsupported_rulebook_perk")
+
 
 if __name__ == "__main__":
     unittest.main()
