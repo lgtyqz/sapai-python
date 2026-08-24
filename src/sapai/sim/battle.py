@@ -26,6 +26,9 @@ class BattleFrame:
     player: Team
     opponent: Team
     log_index: int
+    event: str = "state"
+    actor_id: int | None = None
+    target_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -68,6 +71,7 @@ class BattleSimulator:
         self.log: list[str] = []
         self.frames: list[BattleFrame] = []
         self.events = 0
+        self.next_visual_id = 1
         self.team_uses: list[dict[str, int]] = [{}, {}]
 
     def simulate(
@@ -85,7 +89,11 @@ class BattleSimulator:
         self.log = []
         self.frames = []
         self.events = 0
+        self.next_visual_id = 1
         self.team_uses = [{}, {}]
+        for side in (0, 1):
+            for pet in self.teams[side]:
+                self._assign_visual_id(pet, replace=True)
         self._capture("Initial teams")
         for side in (0, 1):
             for pet in self.teams[side]:
@@ -111,8 +119,7 @@ class BattleSimulator:
         rounds = 0
         while self.teams[0] and self.teams[1] and rounds < self.MAX_ROUNDS:
             rounds += 1
-            self._attack(attacking_side)
-            self._capture(f"Round {rounds}")
+            self._attack(attacking_side, rounds)
             attacking_side = 1 - attacking_side
 
         if rounds >= self.MAX_ROUNDS and self.teams[0] and self.teams[1]:
@@ -157,15 +164,38 @@ class BattleSimulator:
                 f"pets={unsupported_pets}, perks={unsupported_perks}"
             )
 
-    def _capture(self, label: str) -> None:
+    def _capture(
+        self,
+        label: str,
+        *,
+        event: str = "state",
+        actor: Pet | None = None,
+        target: Pet | None = None,
+    ) -> None:
         self.frames.append(
             BattleFrame(
                 label=label,
                 player=Team.from_pets(pet.clone() for pet in self.teams[0]),
                 opponent=Team.from_pets(pet.clone() for pet in self.teams[1]),
                 log_index=len(self.log),
+                event=event,
+                actor_id=self._visual_id(actor),
+                target_id=self._visual_id(target),
             )
         )
+
+    def _assign_visual_id(self, pet: Pet, *, replace: bool = False) -> int:
+        if replace or "battle_visual_id" not in pet.metadata:
+            pet.metadata["battle_visual_id"] = self.next_visual_id
+            self.next_visual_id += 1
+        return int(pet.metadata["battle_visual_id"])
+
+    @staticmethod
+    def _visual_id(pet: Pet | None) -> int | None:
+        if pet is None:
+            return None
+        value = pet.metadata.get("battle_visual_id")
+        return int(value) if value is not None else None
 
     def _tick(self) -> None:
         self.events += 1
@@ -194,7 +224,7 @@ class BattleSimulator:
             if pet in self.teams[side] and pet.alive:
                 self._execute(side, pet, "before_start_battle")
 
-    def _attack(self, side: int) -> None:
+    def _attack(self, side: int, round_number: int) -> None:
         enemy_side = 1 - side
         if not self.teams[side] or not self.teams[enemy_side]:
             return
@@ -203,8 +233,20 @@ class BattleSimulator:
         self._execute(side, attacker, "before_attack")
         if not attacker.alive:
             self._resolve_deaths()
+            self._capture(
+                f"Round {round_number} resolved",
+                event="resolve",
+                actor=attacker,
+                target=defender,
+            )
             return
 
+        self._capture(
+            f"{attacker.name} attacks {defender.name}",
+            event="attack",
+            actor=attacker,
+            target=defender,
+        )
         attack_damage = attacker.effective_attack + self._attack_bonus(attacker)
         defense_damage = defender.effective_attack + self._attack_bonus(defender)
         self.log.append(f"P{side + 1} {attacker.name} attacks P{enemy_side + 1} {defender.name}")
@@ -219,6 +261,13 @@ class BattleSimulator:
             for follower in list(self.teams[side][attacker_index + 1 :]):
                 self._execute(side, follower, "friend_ahead_attacked", trigger_pet=attacker)
 
+        self._capture(
+            "Damage and attack abilities resolve",
+            event="impact",
+            actor=attacker,
+            target=defender,
+        )
+
         defender_knocked_out = not defender.alive
         attacker_knocked_out = not attacker.alive
         self._resolve_deaths()
@@ -227,6 +276,12 @@ class BattleSimulator:
         if attacker_knocked_out and defender in self.teams[enemy_side]:
             self._execute(enemy_side, defender, "knockout", trigger_pet=attacker)
         self._resolve_deaths()
+        self._capture(
+            f"Round {round_number} resolved",
+            event="resolve",
+            actor=attacker,
+            target=defender,
+        )
 
     def _attack_bonus(self, pet: Pet) -> int:
         perk = self.rules.perk_definition(pet.perk)
@@ -324,6 +379,7 @@ class BattleSimulator:
         room = max(0, 5 - len(self.teams[side]))
         accepted = summons[:room]
         for pet in accepted:
+            self._assign_visual_id(pet)
             pet.metadata["battle"] = {
                 "uses": {},
                 "counters": {},

@@ -1,8 +1,9 @@
-"""Render battle and Arena timelines as self-contained HTML files."""
+"""Render battle and Arena timelines with a shared offline asset bundle."""
 
 from __future__ import annotations
 
 import json
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,15 @@ from sapai.sim.models import Food, Pet, RunState, Team
 from sapai.training.arena import ArenaRunResult
 from sapai.visualization.assets import SpriteAtlas
 
+STYLESHEET_NAME = "sapai.css"
+SCRIPT_NAME = "sapai.js"
+TEMPLATE_NAME = "timeline.html"
 
-def _pet(pet: Pet | None) -> dict[str, Any] | None:
+
+def _pet(pet: Pet | None, *, position: int | None = None) -> dict[str, Any] | None:
     if pet is None:
         return None
-    return {
+    value = {
         "name": pet.name,
         "attack": pet.effective_attack,
         "health": pet.effective_health,
@@ -24,10 +29,16 @@ def _pet(pet: Pet | None) -> dict[str, Any] | None:
         "experience": pet.experience,
         "perk": pet.perk,
     }
+    visual_id = pet.metadata.get("battle_visual_id")
+    if visual_id is not None:
+        value["visualId"] = int(visual_id)
+    if position is not None:
+        value["position"] = position
+    return value
 
 
 def _team(team: Team) -> list[dict[str, Any] | None]:
-    return [_pet(pet) for pet in team.slots]
+    return [_pet(pet, position=position) for position, pet in enumerate(team.slots)]
 
 
 def _food(food: Food) -> dict[str, Any]:
@@ -50,12 +61,95 @@ def _state(state: RunState) -> dict[str, Any]:
     }
 
 
-def _battle_slide(frame: BattleFrame, result: BattleResult, *, prefix: str = ""):
+def _frame_entities(frame: BattleFrame | None) -> dict[int, tuple[str, int, Pet]]:
+    if frame is None:
+        return {}
+    result: dict[int, tuple[str, int, Pet]] = {}
+    for side, team in (("player", frame.player), ("opponent", frame.opponent)):
+        for position, pet in enumerate(team.slots):
+            if pet is None:
+                continue
+            visual_id = pet.metadata.get("battle_visual_id")
+            if visual_id is not None:
+                result[int(visual_id)] = (side, position, pet)
+    return result
+
+
+def _animated_team(
+    team: Team,
+    frame: BattleFrame,
+    previous_entities: dict[int, tuple[str, int, Pet]],
+    *,
+    has_previous: bool,
+) -> list[dict[str, Any] | None]:
+    values: list[dict[str, Any] | None] = []
+    for position, pet in enumerate(team.slots):
+        value = _pet(pet, position=position)
+        if pet is None or value is None:
+            values.append(None)
+            continue
+        visual_id = value.get("visualId")
+        previous = previous_entities.get(visual_id) if visual_id is not None else None
+        previous_pet = previous[2] if previous else None
+        value["animation"] = {
+            "entered": has_previous and previous_pet is None,
+            "attackDelta": (
+                pet.effective_attack - previous_pet.effective_attack if previous_pet else 0
+            ),
+            "healthDelta": (
+                pet.effective_health - previous_pet.effective_health if previous_pet else 0
+            ),
+            "perkChanged": previous_pet is not None and pet.perk != previous_pet.perk,
+            "previousPerk": previous_pet.perk if previous_pet else None,
+            "role": (
+                "attacker"
+                if frame.event == "attack" and visual_id == frame.actor_id
+                else "target"
+                if frame.event == "attack" and visual_id == frame.target_id
+                else None
+            ),
+        }
+        values.append(value)
+    return values
+
+
+def _battle_slide(
+    frame: BattleFrame,
+    result: BattleResult,
+    *,
+    previous: BattleFrame | None = None,
+    prefix: str = "",
+) -> dict[str, Any]:
+    previous_entities = _frame_entities(previous)
+    current_entities = _frame_entities(frame)
+    departed = []
+    if previous is not None:
+        for visual_id, (side, position, pet) in previous_entities.items():
+            if visual_id not in current_entities:
+                departed.append(
+                    {
+                        "side": side,
+                        "position": position,
+                        "pet": _pet(pet, position=position),
+                    }
+                )
     return {
         "type": "battle",
+        "event": frame.event,
         "label": f"{prefix}{frame.label}",
-        "player": _team(frame.player),
-        "opponent": _team(frame.opponent),
+        "player": _animated_team(
+            frame.player,
+            frame,
+            previous_entities,
+            has_previous=previous is not None,
+        ),
+        "opponent": _animated_team(
+            frame.opponent,
+            frame,
+            previous_entities,
+            has_previous=previous is not None,
+        ),
+        "departed": departed,
         "log": result.log[: frame.log_index],
         "outcome": result.outcome.value,
     }
@@ -83,7 +177,14 @@ def render_battle_html(
     frames = result.frames or [
         BattleFrame("Battle result", result.player, result.opponent, len(result.log))
     ]
-    slides = [_battle_slide(frame, result) for frame in frames]
+    slides = [
+        _battle_slide(
+            frame,
+            result,
+            previous=frames[index - 1] if index else None,
+        )
+        for index, frame in enumerate(frames)
+    ]
     payload = {
         "title": "Super Auto Pets battle",
         "subtitle": f"{result.outcome.value.replace('_', ' ').title()} · {result.rounds} rounds",
@@ -109,11 +210,13 @@ def render_arena_html(
                 }
             )
         if arena_turn.battle:
-            for frame in arena_turn.battle.frames:
+            frames = arena_turn.battle.frames
+            for index, frame in enumerate(frames):
                 slides.append(
                     _battle_slide(
                         frame,
                         arena_turn.battle,
+                        previous=frames[index - 1] if index else None,
                         prefix=f"Turn {arena_turn.turn} · ",
                     )
                 )
@@ -135,6 +238,9 @@ def _collect_names(slides: list[dict[str, Any]]) -> dict[str, set[str]]:
         if slide["type"] == "battle":
             pets = slide["player"] + slide["opponent"]
             names["pet"].update(pet["name"] for pet in pets if pet)
+            names["pet"].update(
+                item["pet"]["name"] for item in slide["departed"] if item["pet"]
+            )
         else:
             state = slide["state"]
             names["pet"].update(pet["name"] for pet in state["team"] if pet)
@@ -143,35 +249,36 @@ def _collect_names(slides: list[dict[str, Any]]) -> dict[str, set[str]]:
     return names
 
 
+def _write_shared_file(destination: Path, name: str) -> Path:
+    source = files("sapai.visualization").joinpath("static", name)
+    output = destination.parent / name
+    content = source.read_bytes()
+    if not output.exists() or output.read_bytes() != content:
+        output.write_bytes(content)
+    return output
+
+
 def _write_html(
     payload: dict[str, Any],
     output_path: str | Path,
     assets_root: str | Path,
 ) -> Path:
     atlas = SpriteAtlas(assets_root)
-    payload["sprites"] = atlas.payload(_collect_names(payload["slides"]))
-    encoded = json.dumps(payload, separators=(",", ":")).replace("<", "\\u003c")
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(_TEMPLATE.replace("__SAPAI_PAYLOAD__", encoded), encoding="utf-8")
+    payload["sprites"] = atlas.export_payload(
+        _collect_names(payload["slides"]), destination.parent
+    )
+    encoded = json.dumps(payload, separators=(",", ":")).replace("<", "\\u003c")
+    _write_shared_file(destination, STYLESHEET_NAME)
+    _write_shared_file(destination, SCRIPT_NAME)
+    template = files("sapai.visualization").joinpath("static", TEMPLATE_NAME).read_text(
+        encoding="utf-8"
+    )
+    document = (
+        template.replace("__SAPAI_STYLESHEET__", STYLESHEET_NAME)
+        .replace("__SAPAI_SCRIPT__", SCRIPT_NAME)
+        .replace("__SAPAI_PAYLOAD__", encoded)
+    )
+    destination.write_text(document, encoding="utf-8")
     return destination
-
-
-_TEMPLATE = r'''<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SAP AI visualization</title>
-<style>
-:root{--ink:#20302d;--muted:#6f7e79;--paper:#fbf7eb;--card:#fffdf7;--green:#4f8f79;--gold:#e8b44e;--red:#d8645b}
-*{box-sizing:border-box}body{margin:0;color:var(--ink);font-family:ui-rounded,"SF Pro Rounded",system-ui,sans-serif;background:radial-gradient(circle at top,#fff7ce,#b9ded0 62%,#6ca58f);min-height:100vh}
-.app{max-width:1180px;margin:auto;padding:24px}.head,.controls,.panel{background:rgba(255,253,247,.94);border:2px solid rgba(32,48,45,.15);box-shadow:0 14px 36px rgba(31,73,61,.16);border-radius:24px}.head{padding:20px 26px;margin-bottom:14px}.head h1{margin:0;font-size:clamp(25px,4vw,42px)}.subtitle{color:var(--muted);margin-top:5px}.controls{display:flex;align-items:center;gap:12px;padding:10px 14px;margin-bottom:14px}.controls button{border:0;border-radius:14px;background:var(--green);color:white;padding:10px 18px;font-weight:800;cursor:pointer}.controls button:disabled{opacity:.35}.controls input{flex:1}.counter{min-width:74px;text-align:right;font-variant-numeric:tabular-nums}.panel{padding:20px;min-height:530px}.label{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}.label h2{margin:0;font-size:25px}.tag{background:#e9f3ee;border-radius:999px;padding:7px 12px;font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}.status{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:17px}.pill{background:#f4ecd3;border-radius:999px;padding:7px 12px;font-weight:750}.section-title{margin:16px 0 8px;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.1em}.team{display:grid;grid-template-columns:repeat(5,minmax(100px,1fr));gap:10px}.pet,.food{position:relative;min-height:154px;padding:8px;border:2px solid #d9d5c7;background:var(--card);border-radius:18px;text-align:center;overflow:hidden}.pet.front{border-color:var(--gold)}.pet img,.food img{width:92px;height:92px;object-fit:contain;filter:drop-shadow(0 5px 3px #0002)}.pet .name,.food .name{font-size:13px;font-weight:800;line-height:1.1}.stats{position:absolute;left:7px;right:7px;top:7px;display:flex;justify-content:space-between;font-size:14px;font-weight:900}.attack{color:white;background:#d36b38;border-radius:999px;padding:3px 7px}.health{color:white;background:#5a9b67;border-radius:999px;padding:3px 7px}.level{font-size:11px;color:var(--muted);margin-top:4px}.perk{position:absolute;right:5px;bottom:5px;background:#725b9d;color:white;border-radius:8px;padding:2px 5px;font-size:10px}.empty{display:grid;place-items:center;color:#aaa;background:rgba(255,255,255,.36);border-style:dashed}.shop{display:grid;grid-template-columns:2fr 1fr;gap:14px}.offers{display:grid;grid-template-columns:repeat(5,minmax(90px,1fr));gap:8px}.foods{display:grid;grid-template-columns:repeat(2,minmax(90px,1fr));gap:8px}.food{min-height:144px}.frozen:after{content:"❄";position:absolute;top:6px;right:7px;font-size:22px}.versus{font-weight:900;text-align:center;font-size:20px;margin:12px}.log{margin-top:14px;background:#263b36;color:#eaf6f1;padding:13px 16px;border-radius:16px;max-height:145px;overflow:auto;font:12px/1.5 ui-monospace,monospace}.log div:last-child{color:#ffd778}.action{margin:-5px 0 13px;color:var(--green);font-weight:850}
-@media(max-width:760px){.app{padding:10px}.panel{padding:12px}.team,.offers{grid-template-columns:repeat(3,1fr)}.shop{grid-template-columns:1fr}.pet{min-height:140px}.pet img,.food img{width:76px;height:76px}}
-</style></head><body><main class="app"><header class="head"><h1 id="title"></h1><div class="subtitle" id="subtitle"></div></header><nav class="controls"><button id="prev">← Back</button><input id="range" type="range" min="0" value="0"><button id="next">Next →</button><span class="counter" id="counter"></span></nav><section class="panel" id="stage"></section></main>
-<script>const DATA=__SAPAI_PAYLOAD__;let index=0;const stage=document.querySelector('#stage'),range=document.querySelector('#range');document.querySelector('#title').textContent=DATA.title;document.querySelector('#subtitle').textContent=DATA.subtitle;range.max=Math.max(0,DATA.slides.length-1);
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function petCard(p,i){if(!p)return '<div class="pet empty">Empty</div>';const src=DATA.sprites.pet[p.name];return `<div class="pet ${i===0?'front':''} ${p.frozen?'frozen':''}"><div class="stats"><span class="attack">${p.attack}</span><span class="health">${p.health}</span></div>${src?`<img src="${src}" alt="">`:'<div style="height:92px"></div>'}<div class="name">${esc(p.name)}</div><div class="level">Level ${p.level}</div>${p.perk?`<span class="perk">${esc(p.perk)}</span>`:''}</div>`}
-function foodCard(f){const src=DATA.sprites.food[f.name];return `<div class="food ${f.frozen?'frozen':''}">${src?`<img src="${src}" alt="">`:'<div style="height:92px"></div>'}<div class="name">${esc(f.name)}</div><div class="level">${f.cost} gold</div></div>`}
-const team=(pets,title)=>`<div class="section-title">${title} · front is left</div><div class="team">${pets.map(petCard).join('')}</div>`;
-function battle(s){const recent=s.log.slice(-8).map(x=>`<div>${esc(x)}</div>`).join('')||'<div>Battle setup</div>';return `<div class="label"><h2>${esc(s.label)}</h2><span class="tag">${esc(s.outcome.replaceAll('_',' '))}</span></div>${team(s.opponent,'Opponent')}<div class="versus">VS</div>${team(s.player,'Player')}<div class="log">${recent}</div>`}
-function shop(s){const x=s.state;return `<div class="label"><h2>${esc(s.label)}</h2><span class="tag">Shop</span></div>${s.action?`<div class="action">${esc(s.action)}</div>`:''}<div class="status"><span class="pill">Turn ${x.turn}</span><span class="pill">Tier ${x.tier}</span><span class="pill">🪙 ${x.gold}</span><span class="pill">🏆 ${x.trophies}</span><span class="pill">❤️ ${x.lives}</span></div>${team(x.team,'Team')}<div class="section-title">Shop offers</div><div class="shop"><div class="offers">${x.shopPets.map(petCard).join('')}</div><div class="foods">${x.shopFoods.map(foodCard).join('')}</div></div>`}
-function render(){if(!DATA.slides.length){stage.innerHTML='<h2>No timeline frames</h2>';return}const s=DATA.slides[index];stage.innerHTML=s.type==='battle'?battle(s):shop(s);range.value=index;document.querySelector('#counter').textContent=`${index+1} / ${DATA.slides.length}`;document.querySelector('#prev').disabled=index===0;document.querySelector('#next').disabled=index===DATA.slides.length-1;}
-document.querySelector('#prev').onclick=()=>{index=Math.max(0,index-1);render()};document.querySelector('#next').onclick=()=>{index=Math.min(DATA.slides.length-1,index+1);render()};range.oninput=e=>{index=Number(e.target.value);render()};document.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')document.querySelector('#prev').click();if(e.key==='ArrowRight')document.querySelector('#next').click()});render();</script></body></html>'''

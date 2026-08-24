@@ -48,8 +48,11 @@ tests/                    simulator and end-to-end workflow regression tests
 
 ## Local installation
 
-Use Python 3.11 or 3.12. If this directory was moved after creating `.venv`,
-recreate it because editable-install scripts contain absolute paths.
+Use Python 3.11 or 3.12. Virtual environments are not portable: activation and
+installed command scripts contain the absolute directory in which the
+environment was created.
+
+For a fresh clone with no `.venv`:
 
 ```bash
 cd /Users/lgtyqz/Documents/sapai-python
@@ -57,7 +60,37 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[all]'
+command -v python
+python -c 'import sapai; print(sapai.__file__)'
 ```
+
+The last two commands must report this repository's `.venv/bin/python` and
+`src/sapai/__init__.py` respectively.
+
+If the repository was moved after `.venv` was created, first move the stale
+environment aside and create a genuinely new one. Running `python3 -m venv
+.venv` over the existing directory is not a reliable recreation.
+
+```bash
+cd /Users/lgtyqz/Documents/sapai-python
+deactivate 2>/dev/null || true
+mv .venv .venv-before-move
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[all]'
+command -v python
+python -m sapai.cli --help
+```
+
+The backup can be removed after the new environment passes the smoke checks.
+Always prefer `python -m pip`, `python -m pytest`, and `python -m sapai.cli`
+after activation; this guarantees the module is resolved by the interpreter
+shown by `command -v python`.
+
+If an error names `/opt/homebrew/.../python3.12` instead of `.venv/bin/python`,
+the virtual environment is not actually active. If it names a previous project
+directory, the environment was moved and must be recreated as above.
 
 The project now reads `assets/data` and `assets` by default. Override them with
 global options before the subcommand or with environment variables:
@@ -99,8 +132,17 @@ python -m sapai.cli visualize-arena \
   --output outputs/trained-arena.html
 ```
 
-The HTML files embed only the sprites used by the timeline and work offline.
-Use the slider, arrow buttons, or keyboard arrow keys to move between frames.
+Battle teams share one horizontal battlefield, face toward the center, and keep
+their SAP front-to-back ordering. Attack, impact, damage, buff, perk, summon,
+and faint transitions are animated; use Play/Pause and the speed selector for
+automatic playback, or the slider and arrow keys for manual stepping.
+
+Rendering uses the packaged `timeline.html` template. Each output directory gets
+one shared `sapai.css`, one shared `sapai.js`, and a `sapai-assets/` directory
+containing only the sprites used there. Battle and Arena HTML files contain only
+their timeline JSON and reference those shared files, avoiding repeated runtime
+code and base64 sprite data. The resulting directory works offline; copy the
+HTML, CSS, JavaScript, and `sapai-assets/` directory together when moving it.
 
 ## Stable SAP Library data
 

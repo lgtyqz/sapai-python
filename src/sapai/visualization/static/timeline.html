@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SAP AI visualization</title>
+  <link rel="stylesheet" href="__SAPAI_STYLESHEET__">
+</head>
+<body>
+  <main class="app">
+    <header class="head">
+      <h1 id="title"></h1>
+      <div class="subtitle" id="subtitle"></div>
+    </header>
+    <nav class="controls">
+      <button id="prev">← Back</button>
+      <button id="play">▶ Play</button>
+      <select id="speed" aria-label="Playback speed">
+        <option value="2500">Slow</option>
+        <option value="1500" selected>Normal</option>
+        <option value="850">Fast</option>
+      </select>
+      <input id="range" type="range" min="0" value="0">
+      <button id="next">Next →</button>
+      <span class="counter" id="counter"></span>
+    </nav>
+    <section class="panel" id="stage"></section>
+  </main>
+  <script id="sapai-data" type="application/json">__SAPAI_PAYLOAD__</script>
+  <script src="__SAPAI_SCRIPT__"></script>
+</body>
+</html>

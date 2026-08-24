@@ -82,10 +82,18 @@ class ArenaWorkflowTest(unittest.TestCase):
             loaded = read_arena_decisions(decision_path)
             render_arena_html(run, html_path, ASSETS_PATH)
             html = html_path.read_text(encoding="utf-8")
+            stylesheet = (root / "sapai.css").read_text(encoding="utf-8")
+            runtime = (root / "sapai.js").read_text(encoding="utf-8")
+            pet_assets_created = (root / "sapai-assets" / "Pets").is_dir()
         self.assertEqual(len(loaded), len(run.decisions))
         self.assertEqual(loaded[0].actions, run.decisions[0].actions)
-        self.assertIn("data:image/png;base64", html)
+        self.assertNotIn("data:image/png;base64", html)
         self.assertIn("Super Auto Pets Arena run", html)
+        self.assertIn('href="sapai.css"', html)
+        self.assertIn('src="sapai.js"', html)
+        self.assertIn(".battlefield", stylesheet)
+        self.assertIn("function battle(slide)", runtime)
+        self.assertTrue(pet_assets_created)
 
     def test_battle_frames_and_token_sprite_mapping(self):
         cricket = self.catalog.pet_by_name("Cricket").create()
@@ -95,14 +103,31 @@ class ArenaWorkflowTest(unittest.TestCase):
             Team.from_pets([ant]),
             seed=2,
         )
-        self.assertGreaterEqual(len(result.frames), result.rounds + 2)
+        events = [frame.event for frame in result.frames]
+        self.assertGreaterEqual(len(result.frames), result.rounds * 3 + 2)
+        self.assertIn("attack", events)
+        self.assertIn("impact", events)
+        self.assertIn("resolve", events)
         self.assertEqual(SpriteAtlas(ASSETS_PATH).path("pet", "Zombie Cricket").name, "CricketToken.png")
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "battle.html"
             render_battle_html(result, output, ASSETS_PATH)
             html = output.read_text(encoding="utf-8")
+            stylesheet = (output.parent / "sapai.css").read_text(encoding="utf-8")
+            runtime = (output.parent / "sapai.js").read_text(encoding="utf-8")
+            cricket_sprite_created = (
+                output.parent / "sapai-assets" / "Pets" / "Cricket.png"
+            ).is_file()
         self.assertIn("Super Auto Pets battle", html)
-        self.assertIn("data:image/png;base64", html)
+        self.assertNotIn("data:image/png;base64", html)
+        self.assertIn('href="sapai.css"', html)
+        self.assertIn('src="sapai.js"', html)
+        self.assertIn('id="play"', html)
+        self.assertIn('"event":"impact"', html)
+        self.assertIn('"role":"attacker"', html)
+        self.assertIn("@keyframes lunge-player", stylesheet)
+        self.assertIn('class="battlefield"', runtime)
+        self.assertTrue(cricket_sprite_created)
 
 
 if __name__ == "__main__":

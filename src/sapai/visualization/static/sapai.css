@@ -1,0 +1,588 @@
+:root {
+  --ink: #20302d;
+  --muted: #6f7e79;
+  --paper: #fbf7eb;
+  --card: #fffdf7;
+  --green: #4f8f79;
+  --gold: #e8b44e;
+  --red: #d8645b;
+  --battle-sky: #b8e2ec;
+  --battle-grass: #83bd76;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: var(--ink);
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+  background: radial-gradient(circle at top, #fff7ce, #b9ded0 62%, #6ca58f);
+}
+
+.app {
+  max-width: 1440px;
+  margin: auto;
+  padding: 24px;
+}
+
+.head,
+.controls,
+.panel {
+  border: 2px solid rgba(32, 48, 45, 0.15);
+  border-radius: 24px;
+  background: rgba(255, 253, 247, 0.94);
+  box-shadow: 0 14px 36px rgba(31, 73, 61, 0.16);
+}
+
+.head {
+  margin-bottom: 14px;
+  padding: 20px 26px;
+}
+
+.head h1 {
+  margin: 0;
+  font-size: clamp(25px, 4vw, 42px);
+}
+
+.subtitle {
+  margin-top: 5px;
+  color: var(--muted);
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+}
+
+.controls button,
+.controls select {
+  min-height: 40px;
+  border: 0;
+  border-radius: 14px;
+  font: inherit;
+  font-weight: 800;
+}
+
+.controls button {
+  padding: 10px 18px;
+  color: white;
+  background: var(--green);
+  cursor: pointer;
+}
+
+.controls button:disabled {
+  opacity: 0.35;
+}
+
+.controls select {
+  padding: 0 10px;
+  color: var(--ink);
+  background: #edf5f1;
+}
+
+.controls input {
+  flex: 1;
+  min-width: 80px;
+}
+
+.counter {
+  min-width: 74px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel {
+  min-height: 550px;
+  padding: 20px;
+  overflow: hidden;
+}
+
+.label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.label h2 {
+  margin: 0;
+  font-size: 25px;
+}
+
+.tag,
+.pill {
+  border-radius: 999px;
+  font-weight: 800;
+}
+
+.tag {
+  padding: 7px 12px;
+  background: #e9f3ee;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-bottom: 17px;
+}
+
+.pill {
+  padding: 7px 12px;
+  background: #f4ecd3;
+}
+
+.section-title,
+.side-name {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.section-title {
+  margin: 16px 0 8px;
+}
+
+.team {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(100px, 1fr));
+  gap: 10px;
+}
+
+.pet,
+.food {
+  position: relative;
+  min-width: 0;
+  min-height: 154px;
+  padding: 8px;
+  overflow: visible;
+  border: 2px solid #d9d5c7;
+  border-radius: 18px;
+  background: var(--card);
+  text-align: center;
+}
+
+.pet.front {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px rgba(232, 180, 78, 0.18);
+}
+
+.pet-sprite,
+.food img {
+  width: 92px;
+  height: 92px;
+  object-fit: contain;
+  filter: drop-shadow(0 5px 3px rgba(0, 0, 0, 0.13));
+}
+
+.pet .name,
+.food .name {
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.stats {
+  position: absolute;
+  z-index: 3;
+  top: 7px;
+  right: 7px;
+  left: 7px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.attack,
+.health {
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: white;
+}
+
+.attack {
+  background: #d36b38;
+}
+
+.health {
+  background: #5a9b67;
+}
+
+.level {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.perk {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  max-width: calc(100% - 10px);
+  padding: 2px 5px;
+  overflow: hidden;
+  border-radius: 8px;
+  color: white;
+  background: #725b9d;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty {
+  display: grid;
+  place-items: center;
+  border-style: dashed;
+  color: #aaa;
+  background: rgba(255, 255, 255, 0.36);
+}
+
+.shop {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 14px;
+}
+
+.offers,
+.foods {
+  display: grid;
+  gap: 8px;
+}
+
+.offers {
+  grid-template-columns: repeat(5, minmax(90px, 1fr));
+}
+
+.foods {
+  grid-template-columns: repeat(2, minmax(90px, 1fr));
+}
+
+.food {
+  min-height: 144px;
+}
+
+.frozen::after {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  content: "❄";
+  font-size: 22px;
+}
+
+.action {
+  margin: -5px 0 13px;
+  color: var(--green);
+  font-weight: 850;
+}
+
+/* Battle layout: player back→front, center line, opponent front→back. */
+.battlefield {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 58px minmax(0, 1fr);
+  align-items: end;
+  min-height: 300px;
+  padding: 42px 18px 24px;
+  overflow: hidden;
+  border: 2px solid rgba(47, 101, 91, 0.2);
+  border-radius: 22px;
+  background:
+    radial-gradient(ellipse at 50% 100%, rgba(255, 255, 255, 0.48), transparent 44%),
+    linear-gradient(to bottom, var(--battle-sky) 0 60%, var(--battle-grass) 60% 100%);
+}
+
+.battlefield::after {
+  position: absolute;
+  right: 0;
+  bottom: 26px;
+  left: 0;
+  height: 3px;
+  content: "";
+  background: rgba(48, 88, 54, 0.22);
+}
+
+.battle-side {
+  position: relative;
+  z-index: 2;
+  min-width: 0;
+}
+
+.side-name {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  left: 0;
+  text-align: center;
+}
+
+.battle-team {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: clamp(3px, 0.7vw, 10px);
+  align-items: end;
+}
+
+.battle-team .pet {
+  min-height: 148px;
+  padding: 6px 3px;
+  background: rgba(255, 253, 247, 0.93);
+  transform-origin: center bottom;
+}
+
+.battle-team .pet-sprite {
+  width: min(88px, 100%);
+  height: 88px;
+}
+
+.battle-side--player .pet-sprite {
+  transform: scaleX(-1);
+}
+
+.versus {
+  position: relative;
+  z-index: 4;
+  align-self: center;
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  border: 3px solid #fff8dc;
+  border-radius: 50%;
+  color: white;
+  background: #d65d4c;
+  box-shadow: 0 5px 14px rgba(91, 43, 35, 0.25);
+  font-size: 18px;
+  font-weight: 950;
+}
+
+.log {
+  max-height: 145px;
+  margin-top: 14px;
+  padding: 13px 16px;
+  overflow: auto;
+  border-radius: 16px;
+  color: #eaf6f1;
+  background: #263b36;
+  font: 12px/1.5 ui-monospace, monospace;
+}
+
+.log div:last-child {
+  color: #ffd778;
+}
+
+/* Transition effects are replayed whenever a timeline frame is rendered. */
+.pet.is-attacker.side-player {
+  animation: lunge-player 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.pet.is-attacker.side-opponent {
+  animation: lunge-opponent 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.pet.is-target {
+  animation: counter-hit 620ms ease-in-out;
+}
+
+.pet.is-hurt {
+  animation: damage-shake 520ms ease-out;
+}
+
+.pet.is-hurt::after {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  border: 4px solid rgba(223, 68, 56, 0.7);
+  border-radius: inherit;
+  content: "";
+  pointer-events: none;
+  animation: damage-flash 620ms ease-out forwards;
+}
+
+.pet.is-buffed {
+  animation: buff-pop 700ms ease-out;
+  box-shadow: 0 0 0 4px rgba(91, 191, 113, 0.35), 0 0 28px rgba(91, 191, 113, 0.6);
+}
+
+.pet.is-summoned {
+  animation: summon-pop 720ms cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+
+.pet.perk-changed .perk {
+  animation: perk-spin 720ms ease-out;
+}
+
+.delta-stack {
+  position: absolute;
+  z-index: 8;
+  top: 30px;
+  right: 2px;
+  left: 2px;
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.delta {
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: white;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.22);
+  font-size: 13px;
+  font-weight: 950;
+  animation: delta-float 900ms ease-out forwards;
+}
+
+.delta.damage {
+  background: #cf443b;
+}
+
+.delta.buff {
+  background: #3e9a5c;
+}
+
+.delta.perk {
+  background: #725b9d;
+}
+
+.faint-ghost {
+  position: absolute;
+  z-index: 10;
+  top: 72px;
+  width: 112px;
+  text-align: center;
+  pointer-events: none;
+  animation: faint-away 950ms ease-in forwards;
+}
+
+.faint-ghost.side-player {
+  left: 25%;
+}
+
+.faint-ghost.side-opponent {
+  right: 25%;
+}
+
+.faint-ghost img {
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+  filter: grayscale(0.5) drop-shadow(0 5px 3px rgba(0, 0, 0, 0.18));
+}
+
+.faint-ghost span {
+  display: block;
+  margin-top: -8px;
+  color: #8b3030;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+@keyframes lunge-player {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  42% { transform: translateX(48px) rotate(4deg) scale(1.06); }
+}
+
+@keyframes lunge-opponent {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  42% { transform: translateX(-48px) rotate(-4deg) scale(1.06); }
+}
+
+@keyframes counter-hit {
+  0%, 100% { transform: translateX(0); }
+  45% { transform: translateX(-8px) scale(0.97); }
+  60% { transform: translateX(6px); }
+}
+
+@keyframes damage-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-7px) rotate(-2deg); }
+  40% { transform: translateX(7px) rotate(2deg); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(3px); }
+}
+
+@keyframes damage-flash {
+  0% { opacity: 1; background: rgba(255, 69, 54, 0.42); }
+  100% { opacity: 0; background: transparent; }
+}
+
+@keyframes buff-pop {
+  0% { transform: scale(0.9); filter: brightness(1); }
+  45% { transform: scale(1.08); filter: brightness(1.25); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+
+@keyframes summon-pop {
+  0% { opacity: 0; transform: translateY(-38px) scale(0.3) rotate(-8deg); }
+  70% { opacity: 1; transform: translateY(4px) scale(1.08) rotate(2deg); }
+  100% { transform: translateY(0) scale(1) rotate(0); }
+}
+
+@keyframes perk-spin {
+  0% { opacity: 0; transform: rotate(-180deg) scale(0.2); }
+  70% { opacity: 1; transform: rotate(8deg) scale(1.15); }
+  100% { transform: rotate(0) scale(1); }
+}
+
+@keyframes delta-float {
+  0% { opacity: 0; transform: translateY(10px) scale(0.75); }
+  25% { opacity: 1; transform: translateY(0) scale(1.1); }
+  100% { opacity: 0; transform: translateY(-38px) scale(1); }
+}
+
+@keyframes faint-away {
+  0% { opacity: 1; transform: translateY(0) rotate(0) scale(1); }
+  45% { opacity: 0.8; transform: translateY(-18px) rotate(-5deg) scale(0.92); }
+  100% { opacity: 0; transform: translateY(-70px) rotate(9deg) scale(0.45); }
+}
+
+@media (max-width: 980px) {
+  .app { padding: 12px; }
+  .panel { padding: 12px; }
+  .battlefield { grid-template-columns: minmax(0, 1fr) 44px minmax(0, 1fr); padding-inline: 7px; }
+  .versus { width: 44px; height: 44px; font-size: 14px; }
+  .battle-team .pet { min-height: 124px; }
+  .battle-team .pet-sprite { height: 68px; }
+  .battle-team .pet .name { font-size: 10px; }
+  .battle-team .pet .level { display: none; }
+  .battle-team .stats { right: 3px; left: 3px; font-size: 11px; }
+  .battle-team .attack, .battle-team .health { padding: 2px 5px; }
+}
+
+@media (max-width: 760px) {
+  .controls { flex-wrap: wrap; }
+  .controls input { order: 4; flex-basis: 100%; }
+  .team,
+  .offers { grid-template-columns: repeat(3, 1fr); }
+  .shop { grid-template-columns: 1fr; }
+  .pet { min-height: 140px; }
+  .pet-sprite,
+  .food img { width: 76px; height: 76px; }
+  .battlefield { min-width: 680px; }
+  .panel:has(.battlefield) { overflow-x: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

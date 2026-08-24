@@ -372,7 +372,15 @@ def main(argv: list[str] | None = None) -> int:
             from sapai.visualization import render_battle_html
 
             output = render_battle_html(result, args.output, args.assets)
-            _json({"output": str(output), "frames": len(result.frames)})
+            _json(
+                {
+                    "output": str(output),
+                    "stylesheet": str(output.with_name("sapai.css")),
+                    "runtime": str(output.with_name("sapai.js")),
+                    "assets": str(output.with_name("sapai-assets")),
+                    "frames": len(result.frames),
+                }
+            )
     elif args.command == "model-smoke":
         from sapai.ml.smoke import run_model_smoke
 
@@ -459,6 +467,9 @@ def main(argv: list[str] | None = None) -> int:
         _json(
             {
                 "output": str(output),
+                "stylesheet": str(output.with_name("sapai.css")),
+                "runtime": str(output.with_name("sapai.js")),
+                "assets": str(output.with_name("sapai-assets")),
                 "turns": len(run.turns),
                 "trophies": run.final_state.trophies,
             }

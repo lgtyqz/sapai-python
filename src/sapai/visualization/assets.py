@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 from pathlib import Path
 from typing import ClassVar
+from urllib.parse import quote
 
 
 class SpriteAtlas:
@@ -61,6 +63,8 @@ class SpriteAtlas:
         return value
 
     def payload(self, names: dict[str, set[str]]) -> dict[str, dict[str, str]]:
+        """Build a legacy self-contained data-URI sprite payload."""
+
         result: dict[str, dict[str, str]] = {}
         for kind, values in names.items():
             result[kind] = {}
@@ -68,4 +72,30 @@ class SpriteAtlas:
                 uri = self.data_uri(kind, name)
                 if uri:
                     result[kind][name] = uri
+        return result
+
+    def export_payload(
+        self,
+        names: dict[str, set[str]],
+        output_directory: str | Path,
+        *,
+        bundle_name: str = "sapai-assets",
+    ) -> dict[str, dict[str, str]]:
+        """Copy used sprites into one output bundle and return relative URLs."""
+
+        output = Path(output_directory)
+        result: dict[str, dict[str, str]] = {}
+        for kind, values in names.items():
+            result[kind] = {}
+            sprite_directory = output / bundle_name / self.DIRECTORIES[kind]
+            for name in sorted(values):
+                source = self.path(kind, name)
+                if source is None:
+                    continue
+                sprite_directory.mkdir(parents=True, exist_ok=True)
+                destination = sprite_directory / source.name
+                if not destination.exists() or destination.stat().st_size != source.stat().st_size:
+                    shutil.copy2(source, destination)
+                relative = Path(bundle_name) / self.DIRECTORIES[kind] / destination.name
+                result[kind][name] = quote(relative.as_posix())
         return result
