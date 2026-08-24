@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 .mypy_cache/
 .coverage
 htmlcov/
@@ -11,4 +12,6 @@ build/
 .env
 checkpoints/
 datasets/
-
+outputs/
+runs/
+.DS_Store

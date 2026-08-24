@@ -42,6 +42,10 @@ class BattleSimulationError(RuntimeError):
     pass
 
 
+class UnsupportedRuleError(BattleSimulationError):
+    pass
+
+
 DEFAULT_TURTLE_RULES = RuleBook.turtle()
 
 
@@ -128,6 +132,30 @@ class BattleSimulator:
             log=list(self.log),
             frames=list(self.frames),
         )
+
+    def assert_team_supported(self, team: Team) -> None:
+        """Refuse silent base-combat fallbacks when producing training labels."""
+
+        unsupported_pets = sorted(
+            {
+                pet.name
+                for pet in team.slots
+                if pet is not None and pet.name not in self.rules.supported_pets
+            }
+        )
+        supported_perks = self.rules.data["perks"]
+        unsupported_perks = sorted(
+            {
+                pet.perk
+                for pet in team.slots
+                if pet is not None and pet.perk and pet.perk not in supported_perks
+            }
+        )
+        if unsupported_pets or unsupported_perks:
+            raise UnsupportedRuleError(
+                "training board contains unsupported rules: "
+                f"pets={unsupported_pets}, perks={unsupported_perks}"
+            )
 
     def _capture(self, label: str) -> None:
         self.frames.append(

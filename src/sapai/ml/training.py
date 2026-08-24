@@ -33,6 +33,7 @@ def label_board_pairs(
     rng = random.Random(seed)
     groups: dict[tuple[int, str, str], list[BoardSnapshot]] = {}
     for board in boards:
+        simulator.assert_team_supported(board.team)
         groups.setdefault((board.turn, board.pack, board.version), []).append(board)
     eligible = [values for values in groups.values() if len(values) >= 2]
     if not eligible:

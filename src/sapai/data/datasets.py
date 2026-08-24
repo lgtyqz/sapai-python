@@ -151,6 +151,23 @@ def build_battle_dataset(
         counts[split_name] = write_battle_examples(output / f"{split_name}.jsonl", labeled)
         remaining -= requested
 
+    catalog_payload = []
+    if simulator.catalog is not None:
+        catalog_payload = [
+            {
+                "id": spec.id,
+                "name": spec.name,
+                "tier": spec.tier,
+                "attack": spec.attack,
+                "health": spec.health,
+                "packs": spec.packs,
+                "ability_text": spec.ability_text,
+            }
+            for spec in sorted(simulator.catalog.pets.values(), key=lambda item: item.id)
+        ]
+    catalog_fingerprint = hashlib.sha256(
+        json.dumps(catalog_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     manifest = {
         "format": "sapai-battle-dataset-v1",
         "seed": seed,
@@ -160,6 +177,8 @@ def build_battle_dataset(
         "validation_fraction": validation_fraction,
         "test_fraction": test_fraction,
         "split_unit": "replay_id",
+        "catalog_sha256": catalog_fingerprint,
+        "rules_source": dict(simulator.rules.source),
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest

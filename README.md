@@ -1,207 +1,282 @@
 # SAP AI (Python/TensorFlow)
 
-This directory is a standalone Python implementation of the architecture from
-the “Super Auto Pets Expertise” design discussion:
+This repository is a dependency-free Super Auto Pets shop/battle simulator plus
+an end-to-end TensorFlow training stack. It does not load SAP Calculator,
+Angular, Node.js, or the old TensorFlow.js/MuZero project.
 
-- exact, dependency-free shop state transitions;
-- a native, data-driven battle simulator with explicit ability ordering and
-  Turtle-pack coverage;
-- SAP Library replay parsing and read-only Neon/Postgres ingestion;
-- a small TensorFlow entity transformer with legal-action scoring, run value,
-  next-battle, and expected-wins heads;
-- low-budget policy-guided MCTS with sampled roll outcomes and progressive
-  widening.
+The Turtle rulebook was audited against SAP Calculator commit
+`d165eb0a02f8aa0b54d72ed1d5490a44390d07f4`. Pet, food, perk, trigger ordering,
+and shop/battle behavior live in `src/sapai/sim/rules/turtle.json`; the Python
+engines execute generic selectors and effects. Shop events are real game events:
+Turkey permanently buffs bought/summoned pets and Shark permanently scales when
+a friend faints in the shop.
 
-It does not import the old TensorFlow.js/MuZero code. The Python simulator is a
-separate package so rules can be tested independently of learning code.
+## What is implemented
 
-The rule data was audited against
-[SAP Calculator](https://github.com/robertley/SAP-Calculator) commit
-`d165eb0a02f8aa0b54d72ed1d5490a44390d07f4`. The simulator does not import,
-execute, or package that Angular/TypeScript project. The source commit is stored
-inside the rule file so datasets remain reproducible.
+- Exact, seeded shop transitions and native Turtle battle simulation.
+- Structured battle frames and complete Arena shop/battle timelines.
+- Sprite lookup through `assets/data/*NameId*` mappings, including token names.
+- Self-contained battle and Arena HTML visualizations.
+- SAP Library replay parsing and read-only Neon/Postgres ingestion.
+- Stable board, W/D/L, and Arena-decision JSONL formats.
+- Replay-ID-safe train/validation/test splitting and patch/catalog manifests.
+- Checkpointed `BattleModel` and policy/value training with resume support.
+- Empirical opponent populations and cached fixed-shape opponent tensors.
+- Complete Arena rollouts using heuristic, random, model, or MCTS policies.
+- Search distillation with 8 root candidates and 32 simulations by default.
+- Batched TensorFlow policy/value evaluation through `evaluate_many`.
+- A one-command training sequence and a Google Colab notebook.
 
-## Status
-
-This is an end-to-end foundation, not a claim that every live SAP interaction is
-already exact.
-
-- Current Turtle pet, shop-food, and common-perk behavior is declared in one
-  versioned JSON rulebook and executed by generic Python interpreters.
-- Native battle implements base combat, Turtle pets, common perks, attack-order
-  activation, faint/summon chains, Tiger repeats, and seeded random targeting.
-- The shop runs applicable `Summoned`, `Friend summoned`, `Faint`,
-  `Friend faints`, and `Hurt` rules too. Stat changes are permanent unless the
-  ability explicitly says “until next turn”; shop faint damage can therefore
-  produce further hurt/faint/summon chains.
-- Battle training labels are generated directly by seeded native simulations.
-- New packs should receive a complete rulebook and regression suite before they
-  are enabled for training.
-- The replay parser ports the important behavior from the existing
-  `sap-board-query/parse-replays.js`, including coordinate reversal, permanent +
-  temporary stats, pack IDs, perks, toys, and counters.
-- Search ends at the battle boundary. A learned run value and battle evaluator
-  supply leaf values, as proposed in the design.
-
-The original `environment.ts` was treated as a behavioral sketch. This port
-intentionally corrects several structural problems:
-
-- `END_TURN` no longer performs hidden database I/O or battle simulation.
-- RNG is injected and seedable.
-- Roll is one stochastic action; possible shops are never enumerated.
-- Reordering is an atomic free action rather than being multiplied into every
-  other legal action.
-- Buy destinations and food targets are explicit.
-- Tier-up choices use `min(current_tier + 1, 6)` and are represented as grouped
-  offers.
-- State cloning, canonical hashing, and battle boundaries support MCTS
-  transpositions and cycle detection.
+The simulator currently targets Turtle. A training-label coverage gate raises an
+error if a board contains a pet or perk absent from the pinned rulebook instead
+of silently treating it as vanilla stats.
 
 ## Layout
 
 ```text
+assets/                  sprites plus current pet/food/perk/toy mappings
+notebooks/               Google Colab training notebook
 src/sapai/
-  sim/          state, actions, catalog, generic shop/battle interpreters
-    rules/      versioned pet, food, perk, and ordering data
-  data/         SAP Library replay parser and Neon client
-  ml/           TensorFlow encoders, policy/value model, battle model
-  search/       sampled-chance MCTS and TensorFlow evaluator adapter
-tests/          simulator, ingestion, and search regression tests
+  sim/                   state, shop, battle, and data-driven rules
+  data/                  replay parsing, stable serialization, dataset splits
+  ml/                    encoders, models, checkpointed training pipelines
+  search/                sampled-chance MCTS and TensorFlow evaluator
+  training/              populations and complete Arena episodes
+  visualization/         portable sprite-backed HTML renderer
+tests/                    simulator and end-to-end workflow regression tests
 ```
 
-## Installation
+## Local installation
 
-Simulator only:
+Use Python 3.11 or 3.12. If this directory was moved after creating `.venv`,
+recreate it because editable-install scripts contain absolute paths.
 
 ```bash
-cd sapai-python
+cd /Users/lgtyqz/Documents/sapai-python
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install --upgrade pip
+python -m pip install -e '.[all]'
 ```
 
-TensorFlow and development tools:
+The project now reads `assets/data` and `assets` by default. Override them with
+global options before the subcommand or with environment variables:
 
 ```bash
-pip install -e '.[ml,dev]'
+export SAP_DATA_PATH=/path/to/assets/data
+export SAP_ASSETS_PATH=/path/to/assets
+python -m sapai.cli --data "$SAP_DATA_PATH" catalog-report --pack Turtle
 ```
 
-Complete local environment, including TensorFlow, Neon, and developer tools:
+## Visualizations
+
+Generate a battle timeline (team position zero/front is listed first):
 
 ```bash
-pip install -e '.[all]'
+python -m sapai.cli visualize-battle \
+  --player 'Ant,Cricket,Fish' \
+  --opponent 'Mosquito,Horse,Otter' \
+  --seed 7 \
+  --output outputs/battle.html
 ```
 
-SAP Library/Neon access:
+Generate a complete Arena run containing every shop action and battle round:
 
 ```bash
-pip install -e '.[neon]'
+python -m sapai.cli visualize-arena \
+  --seed 3 \
+  --output outputs/arena.html
 ```
 
-Neon's Python documentation recommends a normal Postgres driver such as
-Psycopg 3. The JavaScript-only `@neondatabase/serverless` package is therefore
-replaced by `psycopg[binary]` in the Python package.
-
-## Data paths
-
-The package reads the existing current game-data directory instead of silently
-copying a snapshot:
+Without `--boards`, Arena visualization uses a deterministic synthetic opponent
+pool intended only for smoke tests. Use real boards and a trained policy with:
 
 ```bash
-export SAP_DATA_PATH=/Users/lgtyqz/Documents/sap-ai/sap-data
+python -m sapai.cli visualize-arena \
+  --boards data/boards.jsonl \
+  --policy model \
+  --policy-weights runs/policy-model \
+  --output outputs/trained-arena.html
 ```
 
-Every CLI also accepts `--data PATH`. Pin/copy this directory into a dataset
-artifact before a real training run so a balance update cannot change examples
-mid-run. Store the game version with every replay/checkpoint.
+The HTML files embed only the sprites used by the timeline and work offline.
+Use the slider, arrow buttons, or keyboard arrow keys to move between frames.
 
-## Smoke checks
+## Stable SAP Library data
 
-From this directory:
-
-```bash
-.venv/bin/python -m pytest
-.venv/bin/ruff check src tests
-.venv/bin/python -m sapai.cli --data ../sap-data catalog-report --pack Turtle
-.venv/bin/python -m sapai.cli --data ../sap-data shop-demo --seed 7
-.venv/bin/python -m sapai.cli --data ../sap-data model-smoke
-```
-
-Run a native battle (front pet first):
-
-```bash
-PYTHONPATH=src python -m sapai.cli --data ../sap-data battle \
-  --player 'Ant,Fish' --opponent 'Mosquito,Otter' --seed 7
-```
-
-No Node.js, Angular injector, or SAP Calculator installation is needed. To add
-or rebalance content, edit `src/sapai/sim/rules/turtle.json`; the Python engine
-contains selectors and effect primitives, not pet-name dispatch logic.
-
-## SAP Library / Neon
-
-Do not copy the existing `.env`; it contains credentials. Provide the connection
-string in the process environment:
+Do not copy an existing `.env` into the repository. Set the Neon URL in the
+process environment and export once:
 
 ```bash
 export DATABASE_URL='postgresql://...?...sslmode=require'
-PYTHONPATH=src python -m sapai.cli --data ../sap-data library-sample \
-  --pack Turtle --turn 11 --limit 100
+python -m sapai.cli export-boards \
+  --pack Turtle \
+  --limit 10000 \
+  --output data/boards.jsonl
 ```
 
-`SapLibraryClient` performs read-only, parameterized queries. For repeatable
-training, export replay rows to JSONL once and use `read_replay_jsonl` rather
-than querying `ORDER BY RANDOM()` during every epoch. Split by replay/player/date,
-not individual boards from the same run.
+If raw replay rows are already available as JSONL:
 
-## Model inputs and outputs
+```bash
+python -m sapai.cli parse-replays \
+  --input data/raw-replays.jsonl \
+  --output data/boards.jsonl
+```
 
-The policy/value model encodes 13 entities:
+Keep `boards.jsonl` with the run artifacts. Training never queries a moving
+database sample during an epoch.
+
+## Recommended training sequence
+
+The entire sequence is executable. For a first Colab validation run, use small
+counts; increase them after all cells pass.
+
+### 1. Generate native battle labels
+
+Pairs are matched on `(turn, pack, version)`. Whole replay IDs are assigned to
+one split before pairs are sampled, preventing the same run from leaking into
+validation or test data.
+
+```bash
+python -m sapai.cli label-battles \
+  --boards data/boards.jsonl \
+  --output runs/battle-dataset \
+  --examples 100000 \
+  --simulations-per-pair 8 \
+  --seed 2026
+```
+
+### 2. Train the W/D/L battle model
+
+```bash
+python -m sapai.cli train-battle \
+  --dataset runs/battle-dataset \
+  --output runs/battle-model \
+  --epochs 20 \
+  --batch-size 128 \
+  --seed 2026
+```
+
+Every epoch writes a TensorFlow checkpoint and `history.json`. Rerunning the
+same command resumes automatically; pass `--no-resume` for a fresh optimizer.
+
+### 3. Cache the empirical population
+
+```bash
+python -m sapai.cli cache-population \
+  --boards data/boards.jsonl \
+  --output runs/population.npz
+```
+
+This stores stable encoded opponent inputs and metadata. It deliberately does
+not cache model-dependent embeddings, so the file remains valid as weights
+change.
+
+### 4. Bootstrap a no-search policy/value model
+
+```bash
+python -m sapai.cli generate-arena \
+  --boards data/boards.jsonl \
+  --policy heuristic \
+  --episodes 1000 \
+  --output runs/arena-bootstrap.jsonl \
+  --seed 2026
+
+python -m sapai.cli train-policy \
+  --dataset runs/arena-bootstrap.jsonl \
+  --output runs/policy-model \
+  --epochs 20 \
+  --batch-size 128 \
+  --seed 2026
+```
+
+Each decision includes the exact legal actions, selected/target policy,
+next-battle W/D/L, terminal run value, and final trophy count.
+
+### 5. Search and distill root visits
+
+```bash
+python -m sapai.cli generate-arena \
+  --boards data/boards.jsonl \
+  --policy search \
+  --policy-weights runs/policy-model \
+  --search-candidates 8 \
+  --search-simulations 32 \
+  --episodes 250 \
+  --output runs/arena-search.jsonl \
+  --seed 3026
+
+python -m sapai.cli train-policy \
+  --dataset runs/arena-search.jsonl \
+  --output runs/policy-model \
+  --epochs 25 \
+  --batch-size 128 \
+  --seed 2026
+```
+
+The second policy command resumes the 20-epoch checkpoint and trains through
+epoch 25, so it performs five distillation epochs.
+
+### One-command version
+
+```bash
+python -m sapai.cli train-sequence \
+  --boards data/boards.jsonl \
+  --workdir /content/drive/MyDrive/sapai-runs/run-001 \
+  --battle-examples 100000 \
+  --battle-epochs 20 \
+  --bootstrap-episodes 1000 \
+  --bootstrap-epochs 20 \
+  --search-episodes 250 \
+  --search-epochs 5 \
+  --batch-size 128 \
+  --seed 2026
+```
+
+Outputs include manifests, model configs, rolling checkpoints, final weights,
+training histories, opponent tensors, both trajectory datasets, and a final
+`summary.json`.
+
+## Google Colab
+
+Open `notebooks/sapai_colab_training.ipynb`, choose a T4 GPU runtime, provide
+the Git repository URL and Drive path in the first configuration cell, then run
+all cells. The notebook:
+
+1. mounts Drive;
+2. clones or updates this repository;
+3. installs the editable `ml` package;
+4. verifies GPU visibility and runs tests;
+5. copies or locates stable `boards.jsonl`;
+6. runs a small smoke sequence, then the configurable full sequence;
+7. writes every checkpoint and dataset to Drive.
+
+For T4 runs, start with batch size 64–128. `TensorFlowEvaluator.evaluate_many`
+can evaluate 64–256 independent leaves per model call, although adaptive MCTS
+tree traversal and Python simulation will usually be the throughput bottleneck.
+
+## Model contract
+
+The policy/value transformer encodes 13 entities:
 
 ```text
 5 team pets + 5 shop pets + 2 foods + 1 global token
 ```
 
-Pet, perk, entity-type, numerical, positional, frozen, cost, turn, pack, and
-version features pass through a four-layer, width-192 transformer. Legal actions
-are generated by the simulator and scored as parameterized records:
+It scores simulator-generated legal actions represented by
+`(kind, source, target, reorder permutation)` and produces legal-action logits,
+run value, next-battle W/D/L, and expected final wins. Illegal actions never
+enter the softmax. `BattleModel` compares two encoded teams and predicts W/D/L.
 
-```text
-(kind, source, target, reorder permutation)
+## Verification
+
+```bash
+python -m pytest -q
+python -m ruff check src tests
+python -m sapai.cli model-smoke
 ```
 
-Illegal actions never enter the softmax. The model produces:
-
-- legal-action logits;
-- long-term run value;
-- next-battle W/D/L auxiliary prediction;
-- expected final wins auxiliary prediction.
-
-`BattleModel` separately compares two encoded teams and produces W/D/L.
-
-## Recommended training sequence
-
-1. **Battle labels:** sample same-version, same-turn, same-pack board pairs from
-   SAP Library and run multiple seeded `BattleSimulator` trials per pair.
-2. **Battle model:** train W/D/L; hold out entire replay IDs/players/dates.
-3. **Population evaluator:** cache opponent embeddings or cluster prototype
-   boards for each `(pack, turn, version)`.
-4. **No-search shop policy/value:** run complete Arena episodes against the
-   empirical opponent distribution.
-5. **Search improvement:** run 8 root candidates and 32 simulations per shop
-   decision; distill root visit counts into the policy.
-6. **Scale carefully:** batch 64–256 leaf evaluations on the T4. Simulator and
-   orchestration throughput will likely be the bottleneck, not this network.
-
-## Important next correctness work
-
-Before training a competitive model:
-
-- generate thousands of random Turtle boards and promote every discovered
-  interaction error to a minimized regression fixture;
-- add toys, ailments, mana, swallowed/transformed-pet edge cases, and remaining
-  packs one group at a time;
-- implement patch-pinned catalog snapshots and a coverage gate that refuses
-  native simulation when an active pet/food/perk is unsupported;
-- export a stable SAP Library dataset rather than training against a moving
-  database sample.
+Before claiming competitive accuracy, continue expanding minimized regression
+fixtures for toys, ailments, mana, swallowed/transformed-pet edge cases, and
+future packs. Those mechanics should receive a pinned rulebook and coverage
+gate before their boards are enabled for native training labels.
