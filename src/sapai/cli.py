@@ -5,12 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from sapai.data.datasets import build_battle_dataset
 from sapai.data.library import SapLibraryClient, read_replay_jsonl
 from sapai.data.replay import ReplayParser
 from sapai.data.serialization import read_boards, write_boards
-from sapai.ml.models import ModelConfig
 from sapai.sim.battle import BattleSimulator
 from sapai.sim.catalog import PACK_ALIASES, Catalog
 from sapai.sim.models import Team
@@ -25,6 +24,9 @@ from sapai.training.arena import (
     write_arena_decisions,
 )
 from sapai.training.population import OpponentPopulation
+
+if TYPE_CHECKING:
+    from sapai.ml.models import ModelConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -179,6 +181,8 @@ def _population(args, catalog: Catalog) -> OpponentPopulation:
 
 
 def _model_config_from_weights(weights: str | Path) -> tuple[ModelConfig, Path]:
+    from sapai.ml.models import ModelConfig
+
     path = Path(weights)
     directory = path if path.is_dir() else path.parent
     config_path = directory / "config.json"
@@ -313,6 +317,7 @@ def _generate_episode_dataset(
 
 
 def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
+    from sapai.data.datasets import build_battle_dataset
     from sapai.ml.pipelines import train_battle_model, train_policy_model
 
     root = Path(args.workdir)
@@ -498,6 +503,8 @@ def main(argv: list[str] | None = None) -> int:
         boards = read_replay_jsonl(args.input, ReplayParser(catalog))
         _json({"output": args.output, "boards": write_boards(args.output, boards)})
     elif args.command == "label-battles":
+        from sapai.data.datasets import build_battle_dataset
+
         manifest = build_battle_dataset(
             list(read_boards(args.boards)),
             args.output,

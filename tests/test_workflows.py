@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +23,21 @@ from sapai.visualization.html import render_arena_html, render_battle_html
 from tests.helpers import DATA_PATH, catalog
 
 ASSETS_PATH = DATA_PATH.parent
+
+
+class CliWorkflowTest(unittest.TestCase):
+    def test_cli_import_does_not_initialize_tensorflow(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; import sapai.cli; assert 'tensorflow' not in sys.modules",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class DatasetWorkflowTest(unittest.TestCase):
