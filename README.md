@@ -28,9 +28,9 @@ a friend faints in the shop.
 - A one-command training sequence and a Google Colab notebook.
 
 The simulator currently targets Turtle. The rulebook automatically recognizes
-its generated token pets, and catalog pets explicitly marked "No ability" use
-exact vanilla combat. Unknown replay pet IDs also use their recorded stats as a
-tagged vanilla fallback so new catalog IDs do not stop ingestion. The
+its generated token pets, and catalog pets explicitly described as having no
+ability use exact vanilla combat. Unknown replay pet IDs also use their recorded
+stats as a tagged vanilla fallback so new catalog IDs do not stop ingestion. The
 training-label coverage gate still raises for known ability pets or perks absent
 from the pinned rulebook.
 

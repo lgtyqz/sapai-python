@@ -61,11 +61,16 @@ class BattleSimulatorTest(unittest.TestCase):
         self.simulator.assert_team_supported(
             Team.from_pets(self.catalog.pet_by_name(name).create() for name in token_names[5:])
         )
+        sloth = self.catalog.pet_by_name("Sloth").create()
+        self.simulator.assert_team_supported(Team.from_pets([sloth]))
 
     def test_known_pet_with_unimplemented_ability_still_fails_coverage(self):
         beetle = self.catalog.pet_by_name("Beetle").create()
         with self.assertRaises(UnsupportedRuleError):
             self.simulator.assert_team_supported(Team.from_pets([beetle]))
+        butterfly = self.catalog.pet_by_name("Butterfly").create()
+        with self.assertRaises(UnsupportedRuleError):
+            self.simulator.assert_team_supported(Team.from_pets([butterfly]))
 
 
 if __name__ == "__main__":

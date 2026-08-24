@@ -171,10 +171,7 @@ class BattleSimulator:
             return True
         if self.catalog is None:
             return False
-        spec = self.catalog.pets.get(pet.id)
-        if spec is None or spec.name != pet.name or not spec.ability_text:
-            return False
-        return all(text.strip().casefold().rstrip(".") == "no ability" for text in spec.ability_text)
+        return self.catalog.pet_has_no_ability(pet.id, pet.name)
 
     def _capture(
         self,

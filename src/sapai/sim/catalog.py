@@ -104,6 +104,17 @@ class Catalog:
     def food_by_name(self, name: str) -> FoodSpec:
         return next(spec for spec in self.foods.values() if spec.name == name)
 
+    def pet_has_no_ability(self, pet_id: int, name: str) -> bool:
+        """Return whether the catalog explicitly describes a pet as vanilla combat."""
+
+        spec = self.pets.get(pet_id)
+        if spec is None or spec.name != name or not spec.ability_text:
+            return False
+        return all(
+            "no ability" in text.casefold() or "no special ability" in text.casefold()
+            for text in spec.ability_text
+        )
+
     def pack_pets(self, pack: str, *, through_tier: int = 6) -> list[PetSpec]:
         pack_id = PACK_ALIASES.get(pack, pack)
         return [
