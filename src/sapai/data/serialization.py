@@ -53,7 +53,14 @@ def team_to_dict(team: Team) -> list[dict[str, Any] | None]:
 
 
 def team_from_dict(value: Iterable[Mapping[str, Any] | None]) -> Team:
-    return Team([pet_from_dict(pet) if pet is not None else None for pet in value])
+    return Team(
+        [
+            pet_from_dict(pet)
+            if pet is not None and int(pet.get("id", -1)) >= 0
+            else None
+            for pet in value
+        ]
+    )
 
 
 def action_to_dict(action: Action) -> dict[str, Any]:

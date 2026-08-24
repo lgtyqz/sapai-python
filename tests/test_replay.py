@@ -29,7 +29,13 @@ class ReplayParserTest(unittest.TestCase):
                             "At": {"Perm": 2, "Temp": 1},
                             "Hp": {"Perm": 2, "Temp": 0},
                             "Exp": 0,
-                        }
+                        },
+                        {
+                            "Enu": -1,
+                            "Poi": {"x": 3},
+                            "At": {"Perm": 0, "Temp": 0},
+                            "Hp": {"Perm": 0, "Temp": 0},
+                        },
                     ]
                 },
             },
@@ -41,6 +47,7 @@ class ReplayParserTest(unittest.TestCase):
         self.assertEqual(boards[0].team.slots[0].name, "Ant")
         self.assertEqual(boards[0].team.slots[0].attack, 3)
         self.assertEqual(boards[0].pack, "Turtle")
+        self.assertNotIn("Pet #-1", [pet.name for pet in boards[0].team.slots if pet])
 
 
 if __name__ == "__main__":

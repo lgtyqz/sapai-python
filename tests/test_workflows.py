@@ -7,7 +7,7 @@ from pathlib import Path
 from sapai.cli import _generate_episode_dataset
 from sapai.data.datasets import split_boards
 from sapai.data.replay import BoardSnapshot
-from sapai.data.serialization import read_boards, write_boards
+from sapai.data.serialization import read_boards, team_from_dict, write_boards
 from sapai.sim.battle import BattleSimulator
 from sapai.sim.models import Team
 from sapai.sim.shop import ShopEnvironment
@@ -41,6 +41,24 @@ class CliWorkflowTest(unittest.TestCase):
 
 
 class DatasetWorkflowTest(unittest.TestCase):
+    def test_old_serialized_negative_pet_id_is_an_empty_slot(self):
+        team = team_from_dict(
+            [
+                {
+                    "id": -1,
+                    "name": "Pet #-1",
+                    "tier": 0,
+                    "attack": 0,
+                    "health": 0,
+                },
+                None,
+                None,
+                None,
+                None,
+            ]
+        )
+        self.assertTrue(all(pet is None for pet in team.slots))
+
     def test_board_json_round_trip_and_replay_safe_split(self):
         ant = catalog().pet_by_name("Ant").create()
         boards = [

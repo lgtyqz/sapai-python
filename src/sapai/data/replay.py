@@ -70,6 +70,10 @@ class ReplayParser:
         pets: list[Pet | None] = [None] * 5
         values = [value for value in board.get("Mins", {}).get("Items", []) if value]
         for fallback_position, raw in enumerate(values):
+            # SAP replay arrays can contain materialized empty slots with Enu=-1.
+            # Unknown non-negative IDs remain real pets so the coverage gate catches them.
+            if int(raw.get("Enu", -1)) < 0:
+                continue
             position = int(raw.get("Poi", {}).get("x", fallback_position))
             if 0 <= position < 5:
                 pets[position] = self._parse_pet(raw)
