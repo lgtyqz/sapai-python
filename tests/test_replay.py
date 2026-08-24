@@ -1,8 +1,13 @@
 import json
 import unittest
 
-from sapai.data.library import _sample_query
-from sapai.data.replay import BoardSnapshot, ReplayParser, board_is_pack_compatible
+from sapai.data.library import _pack_name, _sample_query
+from sapai.data.replay import (
+    BoardSnapshot,
+    ReplayParser,
+    board_has_pets,
+    board_is_pack_compatible,
+)
 from sapai.sim.battle import BattleSimulator
 from sapai.sim.models import Team
 from tests.helpers import catalog
@@ -12,11 +17,19 @@ class ReplayParserTest(unittest.TestCase):
     def test_library_query_omits_ambiguous_null_parameter(self):
         packed_query, packed_parameters = _sample_query(mode=0, pack="Turtle", limit=10_000)
         self.assertNotIn("IS NULL", packed_query)
+        self.assertIn("pack, opponent_pack", packed_query)
         self.assertEqual(packed_parameters, (0, "Turtle", "Turtle", 10_000))
 
         unfiltered_query, unfiltered_parameters = _sample_query(mode=0, pack=None, limit=100)
         self.assertNotIn("pack =", unfiltered_query)
         self.assertEqual(unfiltered_parameters, (0, 100))
+
+    def test_database_pack_values_are_normalized(self):
+        self.assertEqual(_pack_name(0), "Turtle")
+        self.assertEqual(_pack_name("0"), "Turtle")
+        self.assertEqual(_pack_name("Pack1"), "Turtle")
+        self.assertEqual(_pack_name("Turtle"), "Turtle")
+        self.assertIsNone(_pack_name(None))
 
     def test_translates_replay_coordinates_and_stats(self):
         battle = {
@@ -115,6 +128,15 @@ class ReplayParserTest(unittest.TestCase):
         }
         boards = ReplayParser(catalog()).parse_battle(battle)
         self.assertEqual([board.pack for board in boards], ["Unknown", "Unknown"])
+        fallback_boards = ReplayParser(catalog()).parse_battle(
+            battle,
+            player_pack="Turtle",
+            opponent_pack="Unicorn",
+        )
+        self.assertEqual(
+            [board.pack for board in fallback_boards],
+            ["Turtle", "Unicorn"],
+        )
 
     def test_pack_compatibility_rejects_known_cross_pack_pets(self):
         current_catalog = catalog()
@@ -131,6 +153,9 @@ class ReplayParserTest(unittest.TestCase):
         sloth = current_catalog.pet_by_name("Sloth").create()
         neutral = BoardSnapshot("neutral", "player", 1, "Turtle", Team.from_pets([sloth]))
         self.assertTrue(board_is_pack_compatible(neutral, current_catalog, "Turtle"))
+        self.assertTrue(board_has_pets(neutral))
+        empty = BoardSnapshot("empty", "player", 1, "Turtle", Team())
+        self.assertFalse(board_has_pets(empty))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from sapai.data.replay import BoardSnapshot, ReplayParser, board_is_pack_compatible
+from sapai.data.replay import (
+    PACK_MAP,
+    BoardSnapshot,
+    ReplayParser,
+    board_has_pets,
+    board_is_pack_compatible,
+)
+from sapai.sim.catalog import PACK_ALIASES
 
 
 def _sample_query(*, mode: int, pack: str | None, limit: int) -> tuple[str, tuple[object, ...]]:
@@ -17,7 +24,7 @@ def _sample_query(*, mode: int, pack: str | None, limit: int) -> tuple[str, tupl
         parameters.extend((pack, pack))
     parameters.append(limit)
     query = f"""
-        SELECT id, raw_json
+        SELECT id, raw_json, pack, opponent_pack
         FROM replays
         WHERE {' AND '.join(clauses)}
         ORDER BY RANDOM()
@@ -65,7 +72,15 @@ class SapLibraryClient:
             for row in cursor:
                 raw = row["raw_json"]
                 replay = json.loads(raw) if isinstance(raw, str) else raw
-                boards.extend(self.parser.parse_replay(replay, replay_id=str(row["id"])))
+                boards.extend(
+                    self.parser.parse_replay(
+                        replay,
+                        replay_id=str(row["id"]),
+                        player_pack=_pack_name(row.get("pack")),
+                        opponent_pack=_pack_name(row.get("opponent_pack")),
+                    )
+                )
+        boards = [board for board in boards if board_has_pets(board)]
         if turn is not None:
             boards = [board for board in boards if board.turn == turn]
         if pack is not None:
@@ -75,6 +90,16 @@ class SapLibraryClient:
                 if board_is_pack_compatible(board, self.parser.catalog, pack)
             ]
         return boards
+
+
+def _pack_name(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, int) or isinstance(value, str) and value.isdigit():
+        return PACK_MAP.get(int(value), str(value))
+    text = str(value)
+    aliases = {pack_id: name for name, pack_id in PACK_ALIASES.items()}
+    return aliases.get(text, text)
 
 
 def read_replay_jsonl(path: str | Path, parser: ReplayParser) -> Iterator[BoardSnapshot]:

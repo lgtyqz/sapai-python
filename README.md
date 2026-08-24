@@ -35,7 +35,9 @@ training-label coverage gate still raises for known ability pets absent from the
 pinned rulebook. Unsupported or unknown perks are retained, tagged, reported,
 and treated as no-effect fallbacks so cross-pack replay ailments do not stop a
 run. Boards labeled Turtle but containing known pets exclusive to another pack
-are excluded from Turtle training and opponent populations.
+are excluded from Turtle training and opponent populations. Database pack
+columns supply missing in-replay pack labels, and snapshots with no pets are
+skipped during export.
 
 ## Layout
 

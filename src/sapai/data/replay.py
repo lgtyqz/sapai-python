@@ -57,6 +57,10 @@ def board_is_pack_compatible(board: BoardSnapshot, catalog: Catalog, pack: str) 
     return True
 
 
+def board_has_pets(board: BoardSnapshot) -> bool:
+    return any(pet is not None for pet in board.team.slots)
+
+
 class ReplayParser:
     """Python translation of ``sap-board-query/parse-replays.js``."""
 
@@ -65,7 +69,12 @@ class ReplayParser:
         self.toys = toys or {}
 
     def parse_replay(
-        self, replay: dict[str, Any], *, replay_id: str | None = None
+        self,
+        replay: dict[str, Any],
+        *,
+        replay_id: str | None = None,
+        player_pack: str | None = None,
+        opponent_pack: str | None = None,
     ) -> list[BoardSnapshot]:
         result: list[BoardSnapshot] = []
         for action in replay.get("Actions", []):
@@ -73,21 +82,46 @@ class ReplayParser:
                 continue
             raw = action["Battle"]
             battle = json.loads(raw) if isinstance(raw, str) else raw
-            result.extend(self.parse_battle(battle, replay_id=replay_id))
+            result.extend(
+                self.parse_battle(
+                    battle,
+                    replay_id=replay_id,
+                    player_pack=player_pack,
+                    opponent_pack=opponent_pack,
+                )
+            )
         return result
 
     def parse_battle(
-        self, battle: dict[str, Any], *, replay_id: str | None = None
+        self,
+        battle: dict[str, Any],
+        *,
+        replay_id: str | None = None,
+        player_pack: str | None = None,
+        opponent_pack: str | None = None,
     ) -> list[BoardSnapshot]:
         return [
-            self._parse_board(battle.get("UserBoard", {}), replay_id=replay_id, side="player"),
             self._parse_board(
-                battle.get("OpponentBoard", {}), replay_id=replay_id, side="opponent"
+                battle.get("UserBoard", {}),
+                replay_id=replay_id,
+                side="player",
+                fallback_pack=player_pack,
+            ),
+            self._parse_board(
+                battle.get("OpponentBoard", {}),
+                replay_id=replay_id,
+                side="opponent",
+                fallback_pack=opponent_pack,
             ),
         ]
 
     def _parse_board(
-        self, board: dict[str, Any], *, replay_id: str | None, side: str
+        self,
+        board: dict[str, Any],
+        *,
+        replay_id: str | None,
+        side: str,
+        fallback_pack: str | None = None,
     ) -> BoardSnapshot:
         pets: list[Pet | None] = [None] * 5
         values = [value for value in board.get("Mins", {}).get("Items", []) if value]
@@ -103,7 +137,7 @@ class ReplayParser:
         pets.reverse()
         pack_value = board.get("Pack")
         deck_title = board.get("Deck", {}).get("Title")
-        pack = PACK_MAP.get(pack_value, deck_title or "Unknown")
+        pack = PACK_MAP.get(pack_value, fallback_pack or deck_title or "Unknown")
         toy = next(
             (
                 value

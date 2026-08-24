@@ -496,6 +496,10 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
         )
         if args.command == "export-boards":
+            if not boards:
+                raise ValueError(
+                    f"database sample produced no non-empty compatible {args.pack!r} boards"
+                )
             _json({"output": args.output, "boards": write_boards(args.output, boards)})
         else:
             _json(
