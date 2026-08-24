@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from sapai.cli import _generate_episode_dataset
 from sapai.data.datasets import split_boards
 from sapai.data.replay import BoardSnapshot
 from sapai.data.serialization import read_boards, write_boards
@@ -128,6 +129,51 @@ class ArenaWorkflowTest(unittest.TestCase):
         self.assertIn("@keyframes lunge-player", stylesheet)
         self.assertIn('class="battlefield"', runtime)
         self.assertTrue(cricket_sprite_created)
+
+    def test_episode_dataset_resumes_from_per_episode_files(self):
+        runner = ArenaRunner(
+            ShopEnvironment(self.catalog),
+            BattleSimulator(self.catalog),
+            self.population,
+            HeuristicPolicy(),
+            max_decisions_per_turn=12,
+        )
+
+        class CountingRunner:
+            calls = 0
+
+            def run(self, *, pack, seed):
+                self.calls += 1
+                return runner.run(pack=pack, seed=seed)
+
+        counting = CountingRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "arena.jsonl"
+            episode_dir = root / "episodes"
+            first = _generate_episode_dataset(
+                counting,
+                output,
+                episode_dir=episode_dir,
+                episodes=1,
+                pack="Turtle",
+                seed=9,
+                identity={"policy": "test"},
+            )
+            output.unlink()
+            second = _generate_episode_dataset(
+                counting,
+                output,
+                episode_dir=episode_dir,
+                episodes=1,
+                pack="Turtle",
+                seed=9,
+                identity={"policy": "test"},
+            )
+
+        self.assertGreater(first, 0)
+        self.assertEqual(second, first)
+        self.assertEqual(counting.calls, 1)
 
 
 if __name__ == "__main__":

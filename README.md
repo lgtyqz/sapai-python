@@ -265,6 +265,7 @@ epoch 25, so it performs five distillation epochs.
 python -m sapai.cli train-sequence \
   --boards data/boards.jsonl \
   --workdir /content/drive/MyDrive/sapai-runs/run-001 \
+  --pack Turtle \
   --battle-examples 100000 \
   --battle-epochs 20 \
   --bootstrap-episodes 1000 \
@@ -276,20 +277,22 @@ python -m sapai.cli train-sequence \
 ```
 
 Outputs include manifests, model configs, rolling checkpoints, final weights,
-training histories, opponent tensors, both trajectory datasets, and a final
-`summary.json`.
+training histories, opponent tensors, resumable per-episode rollout files, both
+combined trajectory datasets, and a final `summary.json`.
 
 ## Google Colab
 
-Open `notebooks/sapai_colab_training.ipynb`, choose a T4 GPU runtime, provide
-the Git repository URL and Drive path in the first configuration cell, then run
-all cells. The notebook:
+Open `notebooks/sapai_colab_training.ipynb`, choose a T4 GPU runtime, add a
+`DATABASE_URL` Colab secret, grant the notebook access to it, provide the Git
+repository URL and Drive paths in the first configuration cell, then run all
+cells. The notebook:
 
 1. mounts Drive;
 2. clones or updates this repository;
 3. installs the editable `ml` package;
 4. verifies GPU visibility and runs tests;
-5. copies or locates stable `boards.jsonl`;
+5. creates `boards.jsonl` from the database when absent, then validates and copies it
+   to the runtime for faster reads;
 6. runs a small smoke sequence, then the configurable full sequence;
 7. writes every checkpoint and dataset to Drive.
 

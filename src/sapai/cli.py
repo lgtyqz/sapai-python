@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from sapai.training.arena import (
     ModelPolicy,
     RandomPolicy,
     SearchPolicy,
+    read_arena_decisions,
     write_arena_decisions,
 )
 from sapai.training.population import OpponentPopulation
@@ -155,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence.add_argument("--boards", required=True)
     sequence.add_argument("--workdir", required=True)
+    sequence.add_argument("--pack", default="Turtle", choices=("Turtle",))
     sequence.add_argument("--battle-examples", type=int, default=10_000)
     sequence.add_argument("--simulations-per-pair", type=int, default=8)
     sequence.add_argument("--battle-epochs", type=int, default=10)
@@ -252,11 +255,72 @@ def _training_config(args, *, epochs: int | None = None):
     )
 
 
+def _file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _generate_episode_dataset(
+    runner: ArenaRunner,
+    output: Path,
+    *,
+    episode_dir: Path,
+    episodes: int,
+    pack: str,
+    seed: int,
+    identity: dict[str, object],
+) -> int:
+    """Checkpoint each rollout separately, then assemble the training JSONL."""
+
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = episode_dir / "manifest.json"
+    manifest = {
+        "format": "sapai-arena-episodes-v1",
+        "pack": pack,
+        "seed": seed,
+        **identity,
+    }
+    if manifest_path.exists():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing != manifest:
+            raise ValueError(
+                f"Arena episode settings changed in {episode_dir}; use a new workdir"
+            )
+    else:
+        if any(episode_dir.glob("*.jsonl")):
+            raise ValueError(f"Arena episodes have no manifest: {episode_dir}")
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    paths: list[Path] = []
+    for episode in range(episodes):
+        episode_path = episode_dir / f"{episode:06d}.jsonl"
+        paths.append(episode_path)
+        if episode_path.exists():
+            if not read_arena_decisions(episode_path):
+                raise ValueError(f"checkpointed Arena episode is empty: {episode_path}")
+            continue
+        decisions = runner.run(pack=pack, seed=seed + episode).decisions
+        temporary = episode_path.with_suffix(".jsonl.tmp")
+        write_arena_decisions(temporary, decisions)
+        temporary.replace(episode_path)
+
+    combined = []
+    for episode_path in paths:
+        combined.extend(read_arena_decisions(episode_path))
+    return write_arena_decisions(output, combined)
+
+
 def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     from sapai.ml.pipelines import train_battle_model, train_policy_model
 
     root = Path(args.workdir)
-    boards = list(read_boards(args.boards))
+    all_boards = list(read_boards(args.boards))
+    boards = [board for board in all_boards if board.pack == args.pack]
+    if not boards:
+        raise ValueError(f"board dataset contains no {args.pack!r} boards")
+    boards_sha256 = _file_sha256(args.boards)
     battle_dataset = root / "battle-dataset"
     manifest = build_battle_dataset(
         boards,
@@ -281,11 +345,20 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         population,
         HeuristicPolicy(),
     )
-    bootstrap = []
-    for episode in range(args.bootstrap_episodes):
-        bootstrap.extend(bootstrap_runner.run(seed=args.seed + episode).decisions)
     bootstrap_path = root / "arena-bootstrap.jsonl"
-    write_arena_decisions(bootstrap_path, bootstrap)
+    bootstrap_decisions = _generate_episode_dataset(
+        bootstrap_runner,
+        bootstrap_path,
+        episode_dir=root / "arena-bootstrap-episodes",
+        episodes=args.bootstrap_episodes,
+        pack=args.pack,
+        seed=args.seed,
+        identity={
+            "policy": "heuristic",
+            "boards_sha256": boards_sha256,
+            "episodes": args.bootstrap_episodes,
+        },
+    )
     policy_dir = root / "policy-model"
     bootstrap_summary = train_policy_model(
         bootstrap_path,
@@ -296,7 +369,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     policy_args = argparse.Namespace(
         policy="search",
         policy_weights=str(policy_dir),
-        pack="Turtle",
+        pack=args.pack,
         seed=args.seed,
         search_simulations=args.search_simulations,
         search_candidates=args.search_candidates,
@@ -307,11 +380,25 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         population,
         _arena_policy(policy_args, environment),
     )
-    distilled = []
-    for episode in range(args.search_episodes):
-        distilled.extend(search_runner.run(seed=args.seed + 100_000 + episode).decisions)
     search_path = root / "arena-search.jsonl"
-    write_arena_decisions(search_path, distilled)
+    search_decisions = _generate_episode_dataset(
+        search_runner,
+        search_path,
+        episode_dir=root / "arena-search-episodes",
+        episodes=args.search_episodes,
+        pack=args.pack,
+        seed=args.seed + 100_000,
+        identity={
+            "policy": "search",
+            "boards_sha256": boards_sha256,
+            "episodes": args.search_episodes,
+            "bootstrap_episodes": args.bootstrap_episodes,
+            "bootstrap_epochs": args.bootstrap_epochs,
+            "batch_size": args.batch_size,
+            "search_simulations": args.search_simulations,
+            "search_candidates": args.search_candidates,
+        },
+    )
     distill_summary = train_policy_model(
         search_path,
         policy_dir,
@@ -323,9 +410,9 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     summary = {
         "battle_dataset": manifest,
         "battle_training": battle_summary,
-        "bootstrap_decisions": len(bootstrap),
+        "bootstrap_decisions": bootstrap_decisions,
         "bootstrap_training": bootstrap_summary,
-        "search_decisions": len(distilled),
+        "search_decisions": search_decisions,
         "distillation_training": distill_summary,
     }
     root.mkdir(parents=True, exist_ok=True)
