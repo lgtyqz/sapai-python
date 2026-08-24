@@ -289,7 +289,7 @@ cells. The notebook:
 
 1. mounts Drive;
 2. clones or updates this repository;
-3. installs the editable `ml` package;
+3. installs the editable package and exposes its `src` layout to the live Colab kernel;
 4. verifies GPU visibility and runs tests;
 5. creates `boards.jsonl` from the database when absent, then validates and copies it
    to the runtime for faster reads;
