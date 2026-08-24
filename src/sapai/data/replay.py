@@ -34,6 +34,13 @@ class BoardSnapshot:
     transformations: int = 0
     version: str = "unknown"
 
+    def __post_init__(self) -> None:
+        # Older exports may contain SAP's Enu=-1 empty-slot sentinel as a Pet.
+        # Normalize it at the domain boundary regardless of which reader created us.
+        for position, pet in enumerate(self.team.slots):
+            if pet is not None and pet.id < 0:
+                self.team.slots[position] = None
+
 
 class ReplayParser:
     """Python translation of ``sap-board-query/parse-replays.js``."""

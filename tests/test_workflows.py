@@ -41,6 +41,13 @@ class CliWorkflowTest(unittest.TestCase):
 
 
 class DatasetWorkflowTest(unittest.TestCase):
+    def test_board_snapshot_normalizes_negative_pet_id(self):
+        ant = catalog().pet_by_name("Ant").create()
+        ant.id = -1
+        ant.name = "Pet #-1"
+        board = BoardSnapshot("old", "player", 1, "Turtle", Team.from_pets([ant]))
+        self.assertTrue(all(pet is None for pet in board.team.slots))
+
     def test_old_serialized_negative_pet_id_is_an_empty_slot(self):
         team = team_from_dict(
             [
