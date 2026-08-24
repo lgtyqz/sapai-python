@@ -1,11 +1,21 @@
 import json
 import unittest
 
+from sapai.data.library import _sample_query
 from sapai.data.replay import ReplayParser
 from tests.helpers import catalog
 
 
 class ReplayParserTest(unittest.TestCase):
+    def test_library_query_omits_ambiguous_null_parameter(self):
+        packed_query, packed_parameters = _sample_query(mode=0, pack="Turtle", limit=10_000)
+        self.assertNotIn("IS NULL", packed_query)
+        self.assertEqual(packed_parameters, (0, "Turtle", "Turtle", 10_000))
+
+        unfiltered_query, unfiltered_parameters = _sample_query(mode=0, pack=None, limit=100)
+        self.assertNotIn("pack =", unfiltered_query)
+        self.assertEqual(unfiltered_parameters, (0, 100))
+
     def test_translates_replay_coordinates_and_stats(self):
         battle = {
             "UserBoard": {

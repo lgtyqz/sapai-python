@@ -9,6 +9,23 @@ from typing import Any
 from sapai.data.replay import BoardSnapshot, ReplayParser
 
 
+def _sample_query(*, mode: int, pack: str | None, limit: int) -> tuple[str, tuple[object, ...]]:
+    clauses = ["mode = %s"]
+    parameters: list[object] = [mode]
+    if pack is not None:
+        clauses.append("(pack = %s OR opponent_pack = %s)")
+        parameters.extend((pack, pack))
+    parameters.append(limit)
+    query = f"""
+        SELECT id, raw_json
+        FROM replays
+        WHERE {' AND '.join(clauses)}
+        ORDER BY RANDOM()
+        LIMIT %s
+    """
+    return query, tuple(parameters)
+
+
 class SapLibraryClient:
     """Read-only SAP Library adapter for Neon's Postgres service.
 
@@ -38,20 +55,13 @@ class SapLibraryClient:
         except ModuleNotFoundError as error:  # pragma: no cover - optional dependency
             raise RuntimeError("install the 'neon' extra to query SAP Library") from error
 
-        query = """
-            SELECT id, raw_json
-            FROM replays
-            WHERE mode = %s
-              AND (%s IS NULL OR pack = %s OR opponent_pack = %s)
-            ORDER BY RANDOM()
-            LIMIT %s
-        """
+        query, parameters = _sample_query(mode=mode, pack=pack, limit=limit)
         boards: list[BoardSnapshot] = []
         with (
             psycopg.connect(self.database_url, row_factory=dict_row) as connection,
             connection.cursor() as cursor,
         ):
-            cursor.execute(query, (mode, pack, pack, pack, limit))
+            cursor.execute(query, parameters)
             for row in cursor:
                 raw = row["raw_json"]
                 replay = json.loads(raw) if isinstance(raw, str) else raw
