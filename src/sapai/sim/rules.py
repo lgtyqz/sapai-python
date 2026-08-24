@@ -135,7 +135,26 @@ class RuleBook:
 
     @property
     def supported_pets(self) -> frozenset[str]:
-        return frozenset(self.data["pets"])
+        return frozenset(self.data["pets"]) | self.generated_pets
+
+    @property
+    def generated_pets(self) -> frozenset[str]:
+        """Pets summoned by rules; these are vanilla tokens unless defined separately."""
+
+        names: set[str] = set()
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                if value.get("op") == "summon" and isinstance(value.get("name"), str):
+                    names.add(value["name"])
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(self.data)
+        return frozenset(names)
 
     @property
     def supported_foods(self) -> frozenset[str]:

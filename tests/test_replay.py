@@ -3,6 +3,7 @@ import unittest
 
 from sapai.data.library import _sample_query
 from sapai.data.replay import ReplayParser
+from sapai.sim.battle import BattleSimulator
 from tests.helpers import catalog
 
 
@@ -48,6 +49,31 @@ class ReplayParserTest(unittest.TestCase):
         self.assertEqual(boards[0].team.slots[0].attack, 3)
         self.assertEqual(boards[0].pack, "Turtle")
         self.assertNotIn("Pet #-1", [pet.name for pet in boards[0].team.slots if pet])
+
+    def test_unknown_pet_id_is_tagged_for_vanilla_fallback(self):
+        battle = {
+            "UserBoard": {
+                "Pack": 0,
+                "Tur": 2,
+                "Mins": {
+                    "Items": [
+                        {
+                            "Enu": 999_999,
+                            "Poi": {"x": 4},
+                            "At": {"Perm": 7, "Temp": 1},
+                            "Hp": {"Perm": 8, "Temp": 2},
+                        }
+                    ]
+                },
+            },
+            "OpponentBoard": {"Pack": 0, "Tur": 2, "Mins": {"Items": []}},
+        }
+        board = ReplayParser(catalog()).parse_battle(battle)[0]
+        pet = board.team.slots[0]
+        self.assertIsNotNone(pet)
+        self.assertEqual((pet.name, pet.attack, pet.health), ("Pet #999999", 8, 10))
+        self.assertEqual(pet.metadata["vanilla_fallback"], "unknown_pet_id")
+        BattleSimulator(catalog()).assert_team_supported(board.team)
 
 
 if __name__ == "__main__":

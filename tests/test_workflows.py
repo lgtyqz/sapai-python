@@ -66,6 +66,27 @@ class DatasetWorkflowTest(unittest.TestCase):
         )
         self.assertTrue(all(pet is None for pet in team.slots))
 
+    def test_old_serialized_unknown_pet_is_inferred_as_vanilla_fallback(self):
+        team = team_from_dict(
+            [
+                {
+                    "id": 999_999,
+                    "name": "Pet #999999",
+                    "tier": 0,
+                    "attack": 7,
+                    "health": 8,
+                },
+                None,
+                None,
+                None,
+                None,
+            ]
+        )
+        pet = team.slots[0]
+        self.assertIsNotNone(pet)
+        self.assertEqual(pet.metadata["vanilla_fallback"], "unknown_pet_id")
+        BattleSimulator(catalog()).assert_team_supported(team)
+
     def test_board_json_round_trip_and_replay_safe_split(self):
         ant = catalog().pet_by_name("Ant").create()
         boards = [

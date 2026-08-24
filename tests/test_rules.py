@@ -11,8 +11,18 @@ class RuleBookTest(unittest.TestCase):
     def test_rulebook_tracks_audited_source_and_covers_turtle_pack(self):
         rules = RuleBook.turtle()
         turtle_names = {spec.name for spec in catalog().pack_pets("Turtle")}
+        turtle_tokens = {
+            "Bee",
+            "Bus",
+            "Chick",
+            "Dirty Rat",
+            "Ram",
+            "Zombie Cricket",
+            "Zombie Fly",
+        }
         self.assertEqual(rules.source["commit"], "d165eb0a02f8aa0b54d72ed1d5490a44390d07f4")
-        self.assertEqual(rules.supported_pets, turtle_names)
+        self.assertEqual(rules.generated_pets, turtle_tokens)
+        self.assertEqual(rules.supported_pets, turtle_names | turtle_tokens)
         self.assertIn("Pizza", rules.supported_foods)
 
     def test_expression_language_is_small_and_deterministic(self):

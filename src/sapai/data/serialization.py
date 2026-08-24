@@ -31,9 +31,14 @@ def pet_to_dict(pet: Pet) -> dict[str, Any]:
 
 
 def pet_from_dict(value: Mapping[str, Any]) -> Pet:
+    pet_id = int(value["id"])
+    name = str(value["name"])
+    metadata = dict(value.get("metadata", {}))
+    if pet_id >= 0 and name == f"Pet #{pet_id}":
+        metadata.setdefault("vanilla_fallback", "unknown_pet_id")
     return Pet(
-        id=int(value["id"]),
-        name=str(value["name"]),
+        id=pet_id,
+        name=name,
         tier=int(value["tier"]),
         attack=int(value["attack"]),
         health=int(value["health"]),
@@ -44,7 +49,7 @@ def pet_from_dict(value: Mapping[str, Any]) -> Pet:
         temporary_health=int(value.get("temporary_health", 0)),
         triggers_consumed=int(value.get("triggers_consumed", 0)),
         instance_id=int(value.get("instance_id", 0)),
-        metadata=dict(value.get("metadata", {})),
+        metadata=metadata,
     )
 
 

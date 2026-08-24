@@ -141,13 +141,15 @@ class BattleSimulator:
         )
 
     def assert_team_supported(self, team: Team) -> None:
-        """Refuse silent base-combat fallbacks when producing training labels."""
+        """Reject known ability pets lacking rules while allowing explicit vanilla pets."""
 
         unsupported_pets = sorted(
             {
                 pet.name
                 for pet in team.slots
-                if pet is not None and pet.name not in self.rules.supported_pets
+                if pet is not None
+                and pet.name not in self.rules.supported_pets
+                and not self._uses_vanilla_fallback(pet)
             }
         )
         supported_perks = self.rules.data["perks"]
@@ -163,6 +165,16 @@ class BattleSimulator:
                 "training board contains unsupported rules: "
                 f"pets={unsupported_pets}, perks={unsupported_perks}"
             )
+
+    def _uses_vanilla_fallback(self, pet: Pet) -> bool:
+        if pet.metadata.get("vanilla_fallback") == "unknown_pet_id":
+            return True
+        if self.catalog is None:
+            return False
+        spec = self.catalog.pets.get(pet.id)
+        if spec is None or spec.name != pet.name or not spec.ability_text:
+            return False
+        return all(text.strip().casefold().rstrip(".") == "no ability" for text in spec.ability_text)
 
     def _capture(
         self,

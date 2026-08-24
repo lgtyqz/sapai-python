@@ -78,7 +78,7 @@ class ReplayParser:
         values = [value for value in board.get("Mins", {}).get("Items", []) if value]
         for fallback_position, raw in enumerate(values):
             # SAP replay arrays can contain materialized empty slots with Enu=-1.
-            # Unknown non-negative IDs remain real pets so the coverage gate catches them.
+            # Unknown non-negative IDs remain vanilla-stat fallback pets.
             if int(raw.get("Enu", -1)) < 0:
                 continue
             position = int(raw.get("Poi", {}).get("x", fallback_position))
@@ -118,6 +118,7 @@ class ReplayParser:
         attack = raw.get("At", {})
         health = raw.get("Hp", {})
         perk_id = raw.get("Perk")
+        metadata = {} if spec else {"vanilla_fallback": "unknown_pet_id"}
         pet = Pet(
             id=pet_id,
             name=spec.name if spec else f"Pet #{pet_id}",
@@ -128,6 +129,7 @@ class ReplayParser:
             perk=self.catalog.perks.get(int(perk_id)) if perk_id else None,
             mana=int(raw.get("Mana", 0)),
             triggers_consumed=self._triggers_consumed(raw),
+            metadata=metadata,
         )
         if pet_id == 182:
             swallowed = raw.get("MiMs", {}).get("Lsts", {}).get("WhiteWhaleAbility", [])

@@ -1,6 +1,6 @@
 import unittest
 
-from sapai.sim.battle import BattleResultKind, BattleSimulator
+from sapai.sim.battle import BattleResultKind, BattleSimulator, UnsupportedRuleError
 from sapai.sim.models import Pet, Team
 from tests.helpers import catalog
 
@@ -45,6 +45,27 @@ class BattleSimulatorTest(unittest.TestCase):
         first_attack = next(index for index, line in enumerate(result.log) if " attacks " in line)
         pre_attack_damage = [line for line in result.log[:first_attack] if "takes 1" in line]
         self.assertEqual(len(pre_attack_damage), 2)
+
+    def test_turtle_tokens_and_no_ability_catalog_pets_are_supported(self):
+        token_names = (
+            "Bee",
+            "Bus",
+            "Chick",
+            "Dirty Rat",
+            "Ram",
+            "Zombie Cricket",
+            "Zombie Fly",
+        )
+        team = Team.from_pets(self.catalog.pet_by_name(name).create() for name in token_names[:5])
+        self.simulator.assert_team_supported(team)
+        self.simulator.assert_team_supported(
+            Team.from_pets(self.catalog.pet_by_name(name).create() for name in token_names[5:])
+        )
+
+    def test_known_pet_with_unimplemented_ability_still_fails_coverage(self):
+        beetle = self.catalog.pet_by_name("Beetle").create()
+        with self.assertRaises(UnsupportedRuleError):
+            self.simulator.assert_team_supported(Team.from_pets([beetle]))
 
 
 if __name__ == "__main__":

@@ -27,9 +27,12 @@ a friend faints in the shop.
 - Batched TensorFlow policy/value evaluation through `evaluate_many`.
 - A one-command training sequence and a Google Colab notebook.
 
-The simulator currently targets Turtle. A training-label coverage gate raises an
-error if a board contains a pet or perk absent from the pinned rulebook instead
-of silently treating it as vanilla stats.
+The simulator currently targets Turtle. The rulebook automatically recognizes
+its generated token pets, and catalog pets explicitly marked "No ability" use
+exact vanilla combat. Unknown replay pet IDs also use their recorded stats as a
+tagged vanilla fallback so new catalog IDs do not stop ingestion. The
+training-label coverage gate still raises for known ability pets or perks absent
+from the pinned rulebook.
 
 ## Layout
 
