@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from sapai.sim.catalog import Catalog
+from sapai.sim.catalog import PACK_ALIASES, Catalog
 from sapai.sim.models import Pet, Team
 
 PACK_MAP = {
@@ -40,6 +40,21 @@ class BoardSnapshot:
         for position, pet in enumerate(self.team.slots):
             if pet is not None and pet.id < 0:
                 self.team.slots[position] = None
+
+
+def board_is_pack_compatible(board: BoardSnapshot, catalog: Catalog, pack: str) -> bool:
+    """Check the board label and reject known pets belonging to another pack."""
+
+    if board.pack != pack:
+        return False
+    pack_id = PACK_ALIASES.get(pack, pack)
+    for pet in board.team.slots:
+        if pet is None:
+            continue
+        spec = catalog.pets.get(pet.id)
+        if spec is not None and spec.packs and pack_id not in spec.packs:
+            return False
+    return True
 
 
 class ReplayParser:
@@ -86,8 +101,9 @@ class ReplayParser:
                 pets[position] = self._parse_pet(raw)
         # Replay coordinates are back-to-front; the simulator uses front at 0.
         pets.reverse()
-        pack_value = board.get("Pack", 0)
-        pack = PACK_MAP.get(pack_value, board.get("Deck", {}).get("Title", "Custom"))
+        pack_value = board.get("Pack")
+        deck_title = board.get("Deck", {}).get("Title")
+        pack = PACK_MAP.get(pack_value, deck_title or "Unknown")
         toy = next(
             (
                 value

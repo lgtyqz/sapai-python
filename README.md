@@ -34,7 +34,8 @@ stats as a tagged vanilla fallback so new catalog IDs do not stop ingestion. The
 training-label coverage gate still raises for known ability pets absent from the
 pinned rulebook. Unsupported or unknown perks are retained, tagged, reported,
 and treated as no-effect fallbacks so cross-pack replay ailments do not stop a
-run.
+run. Boards labeled Turtle but containing known pets exclusive to another pack
+are excluded from Turtle training and opponent populations.
 
 ## Layout
 

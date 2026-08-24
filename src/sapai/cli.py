@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sapai.data.library import SapLibraryClient, read_replay_jsonl
-from sapai.data.replay import ReplayParser
+from sapai.data.replay import ReplayParser, board_is_pack_compatible
 from sapai.data.serialization import read_boards, write_boards
 from sapai.sim.battle import BattleSimulator
 from sapai.sim.catalog import PACK_ALIASES, Catalog
@@ -176,7 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _population(args, catalog: Catalog) -> OpponentPopulation:
     if getattr(args, "boards", None):
-        return OpponentPopulation(list(read_boards(args.boards)))
+        boards = [
+            board
+            for board in read_boards(args.boards)
+            if board_is_pack_compatible(board, catalog, args.pack)
+        ]
+        if not boards:
+            raise ValueError(f"board dataset contains no compatible {args.pack!r} boards")
+        return OpponentPopulation(boards)
     return OpponentPopulation.synthetic(catalog, pack=args.pack, seed=args.seed)
 
 
@@ -322,7 +329,11 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
 
     root = Path(args.workdir)
     all_boards = list(read_boards(args.boards))
-    boards = [board for board in all_boards if board.pack == args.pack]
+    boards = [
+        board
+        for board in all_boards
+        if board_is_pack_compatible(board, catalog, args.pack)
+    ]
     if not boards:
         raise ValueError(f"board dataset contains no {args.pack!r} boards")
     boards_sha256 = _file_sha256(args.boards)

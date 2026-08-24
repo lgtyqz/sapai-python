@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from sapai.data.replay import BoardSnapshot, ReplayParser
+from sapai.data.replay import BoardSnapshot, ReplayParser, board_is_pack_compatible
 
 
 def _sample_query(*, mode: int, pack: str | None, limit: int) -> tuple[str, tuple[object, ...]]:
@@ -69,7 +69,11 @@ class SapLibraryClient:
         if turn is not None:
             boards = [board for board in boards if board.turn == turn]
         if pack is not None:
-            boards = [board for board in boards if board.pack == pack]
+            boards = [
+                board
+                for board in boards
+                if board_is_pack_compatible(board, self.parser.catalog, pack)
+            ]
         return boards
 
 

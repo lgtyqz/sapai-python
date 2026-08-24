@@ -2,8 +2,9 @@ import json
 import unittest
 
 from sapai.data.library import _sample_query
-from sapai.data.replay import ReplayParser
+from sapai.data.replay import BoardSnapshot, ReplayParser, board_is_pack_compatible
 from sapai.sim.battle import BattleSimulator
+from sapai.sim.models import Team
 from tests.helpers import catalog
 
 
@@ -106,6 +107,30 @@ class ReplayParserTest(unittest.TestCase):
         self.assertEqual(team.slots[1].perk, "Perk #999999")
         BattleSimulator(catalog()).assert_team_supported(team)
         self.assertEqual(team.slots[1].metadata["perk_fallback"], "unknown_perk_id")
+
+    def test_missing_pack_does_not_default_to_turtle(self):
+        battle = {
+            "UserBoard": {"Tur": 1, "Mins": {"Items": []}},
+            "OpponentBoard": {"Tur": 1, "Mins": {"Items": []}},
+        }
+        boards = ReplayParser(catalog()).parse_battle(battle)
+        self.assertEqual([board.pack for board in boards], ["Unknown", "Unknown"])
+
+    def test_pack_compatibility_rejects_known_cross_pack_pets(self):
+        current_catalog = catalog()
+        cuddle_toad = current_catalog.pet_by_name("Cuddle Toad").create()
+        contaminated = BoardSnapshot(
+            "cross-pack",
+            "player",
+            1,
+            "Turtle",
+            Team.from_pets([cuddle_toad]),
+        )
+        self.assertFalse(board_is_pack_compatible(contaminated, current_catalog, "Turtle"))
+
+        sloth = current_catalog.pet_by_name("Sloth").create()
+        neutral = BoardSnapshot("neutral", "player", 1, "Turtle", Team.from_pets([sloth]))
+        self.assertTrue(board_is_pack_compatible(neutral, current_catalog, "Turtle"))
 
 
 if __name__ == "__main__":
