@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sapai.data.library import SapLibraryClient, read_replay_jsonl
-from sapai.data.replay import ReplayParser, board_is_pack_compatible
+from sapai.data.replay import ReplayParser
 from sapai.data.serialization import read_boards, write_boards
 from sapai.sim.battle import BattleSimulator
 from sapai.sim.catalog import PACK_ALIASES, Catalog
@@ -23,7 +23,11 @@ from sapai.training.arena import (
     read_arena_decisions,
     write_arena_decisions,
 )
-from sapai.training.population import OpponentPopulation
+from sapai.training.population import (
+    OpponentPopulation,
+    load_opponent_boards,
+    load_opponent_population,
+)
 
 if TYPE_CHECKING:
     from sapai.ml.models import ModelConfig
@@ -176,14 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _population(args, catalog: Catalog) -> OpponentPopulation:
     if getattr(args, "boards", None):
-        boards = [
-            board
-            for board in read_boards(args.boards)
-            if board_is_pack_compatible(board, catalog, args.pack)
-        ]
-        if not boards:
-            raise ValueError(f"board dataset contains no compatible {args.pack!r} boards")
-        return OpponentPopulation(boards)
+        return load_opponent_population(args.boards, catalog, args.pack)
     return OpponentPopulation.synthetic(catalog, pack=args.pack, seed=args.seed)
 
 
@@ -385,14 +382,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     from sapai.ml.pipelines import train_battle_model, train_policy_model
 
     root = Path(args.workdir)
-    all_boards = list(read_boards(args.boards))
-    boards = [
-        board
-        for board in all_boards
-        if board_is_pack_compatible(board, catalog, args.pack)
-    ]
-    if not boards:
-        raise ValueError(f"board dataset contains no {args.pack!r} boards")
+    boards = load_opponent_boards(args.boards, catalog, args.pack)
     boards_sha256 = _file_sha256(args.boards)
     battle_dataset = root / "battle-dataset"
     manifest = _battle_dataset_for_sequence(

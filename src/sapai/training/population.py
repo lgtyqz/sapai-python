@@ -7,10 +7,34 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
-from sapai.data.replay import BoardSnapshot
+from sapai.data.replay import BoardSnapshot, board_is_pack_compatible
+from sapai.data.serialization import read_boards
 from sapai.ml.encoding import encode_teams
 from sapai.sim.catalog import Catalog
 from sapai.sim.models import Team
+
+
+def load_opponent_boards(
+    path: str | Path,
+    catalog: Catalog,
+    pack: str,
+) -> list[BoardSnapshot]:
+    """Load the empirical Arena pool with the same pack filter for every caller."""
+
+    boards = [
+        board for board in read_boards(path) if board_is_pack_compatible(board, catalog, pack)
+    ]
+    if not boards:
+        raise ValueError(f"board dataset contains no compatible {pack!r} boards")
+    return boards
+
+
+def load_opponent_population(
+    path: str | Path,
+    catalog: Catalog,
+    pack: str,
+) -> OpponentPopulation:
+    return OpponentPopulation(load_opponent_boards(path, catalog, pack))
 
 
 class OpponentPopulation:

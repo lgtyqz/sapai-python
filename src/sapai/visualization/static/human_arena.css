@@ -1,0 +1,180 @@
+.sapai-human-output {
+  color: var(--ink);
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+}
+
+.sapai-human-output .app {
+  padding: 8px;
+}
+
+.sapai-human-output .panel {
+  min-height: 510px;
+}
+
+.interactive-card {
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.interactive-card:hover,
+.interactive-card:focus-visible {
+  border-color: var(--green);
+  box-shadow: 0 5px 18px rgba(79, 143, 121, 0.25);
+  outline: none;
+  transform: translateY(-2px);
+}
+
+.interactive-card.selected {
+  border-color: #2c7f65;
+  box-shadow: 0 0 0 4px rgba(79, 143, 121, 0.25);
+}
+
+.interactive-card.legal-target {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 4px rgba(232, 180, 78, 0.28);
+}
+
+.interactive-card.reorder-picked::before {
+  position: absolute;
+  z-index: 7;
+  top: 6px;
+  left: 7px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 50%;
+  color: white;
+  background: var(--green);
+  content: attr(data-order-number);
+  font-weight: 900;
+}
+
+.human-toolbar,
+.context-actions,
+.battle-controls,
+.summary-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.human-toolbar,
+.context-panel,
+.battle-controls,
+.benchmark-summary {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 16px;
+  background: #edf5f1;
+}
+
+.human-toolbar button,
+.context-actions button,
+.battle-controls button,
+.complete-actions button {
+  min-height: 42px;
+  padding: 9px 15px;
+  border: 0;
+  border-radius: 13px;
+  color: white;
+  background: var(--green);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 850;
+}
+
+.human-toolbar button.danger,
+.context-actions button.danger {
+  background: var(--red);
+}
+
+.human-toolbar button.secondary,
+.context-actions button.secondary,
+.battle-controls button.secondary {
+  color: var(--ink);
+  background: #f4ecd3;
+}
+
+.human-toolbar button:disabled,
+.context-actions button:disabled,
+.battle-controls button:disabled,
+.complete-actions button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.context-title {
+  margin-bottom: 8px;
+  font-weight: 900;
+}
+
+.context-help,
+.benchmark-note {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.human-error {
+  margin-bottom: 12px;
+  padding: 10px 13px;
+  border-radius: 12px;
+  color: #74271f;
+  background: #ffe2de;
+  font-weight: 800;
+}
+
+.human-busy {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 24px;
+  color: var(--ink);
+  background: rgba(255, 253, 247, 0.72);
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.sapai-human-output .panel {
+  position: relative;
+}
+
+.battle-progress {
+  flex: 1;
+  align-self: center;
+  min-width: 140px;
+}
+
+.summary-grid {
+  margin-top: 10px;
+}
+
+.summary-stat {
+  min-width: 130px;
+  padding: 10px 12px;
+  border-radius: 13px;
+  background: #fffdf7;
+}
+
+.summary-stat strong {
+  display: block;
+  font-size: 22px;
+}
+
+.complete-actions {
+  margin-top: 16px;
+}
+
+@media (max-width: 760px) {
+  .sapai-human-output .team,
+  .sapai-human-output .offers {
+    grid-template-columns: repeat(3, minmax(88px, 1fr));
+  }
+
+  .sapai-human-output .shop {
+    grid-template-columns: 1fr;
+  }
+}

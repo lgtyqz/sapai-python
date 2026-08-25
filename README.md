@@ -152,6 +152,21 @@ their timeline JSON and reference those shared files, avoiding repeated runtime
 code and base64 sprite data. The resulting directory works offline; copy the
 HTML, CSS, JavaScript, and `sapai-assets/` directory together when moving it.
 
+### Human Arena benchmark in Colab
+
+The training notebook also contains an optional card-driven human benchmark.
+Set `RUN_HUMAN_BENCHMARK=True`, choose a participant alias and a separate
+`HUMAN_BENCHMARK_DIR`, then run the final benchmark cell after repository,
+Drive, installation, and board validation setup. Set `REQUIRE_GPU=False` when
+the notebook is being used only for human play.
+
+The benchmark samples opponents through the same compatible board population
+used by model Arena rollouts. It checkpoints every accepted move, restores the
+current shop or battle review after a runtime reconnect, and writes immutable
+completed episodes plus an aggregate `summary.json` to Drive. Rerun the final
+cell after reconnecting because Colab callbacks belong to the current runtime.
+Human benchmark artifacts are kept separate from policy-training datasets.
+
 ## Stable SAP Library data
 
 Do not copy an existing `.env` into the repository. Set the Neon URL in the
