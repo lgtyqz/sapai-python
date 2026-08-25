@@ -233,6 +233,63 @@ class HumanArenaSessionTest(unittest.TestCase):
             self.assertIsNone(next_view["battle"])
             self.assertFalse((Path(directory) / "current.json.tmp").exists())
 
+    def test_reported_ox_board_persists_when_an_opponent_whale_swallows_a_pet(self):
+        state = ShopEnvironment(self.catalog).reset(seed=4)
+        front_ox = self.catalog.pet_by_name("Ox").create(instance_id=1)
+        front_ox.attack = 10
+        front_ox.health = 7
+        front_ox.perk = "Melon"
+        squirrel = self.catalog.pet_by_name("Squirrel").create(instance_id=2)
+        squirrel.attack = 7
+        squirrel.health = 7
+        back_ox = self.catalog.pet_by_name("Ox").create(instance_id=3)
+        back_ox.attack = 1
+        back_ox.health = 3
+        state.team = Team.from_pets([front_ox, squirrel, back_ox])
+
+        swallowed = self.catalog.pet_by_name("Ant").create(instance_id=4)
+        whale = self.catalog.pet_by_name("Whale").create(instance_id=5)
+        population = OpponentPopulation(
+            [
+                BoardSnapshot(
+                    "whale-opponent",
+                    "opponent",
+                    state.turn,
+                    "Turtle",
+                    Team.from_pets([swallowed, whale]),
+                    version=state.version,
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            session = HumanArenaSession.create_or_resume(
+                FixedEnvironment(self.catalog, state),
+                BattleSimulator(self.catalog),
+                population,
+                HumanBenchmarkConfig(
+                    directory,
+                    "human",
+                    "Turtle",
+                    9,
+                    "whale-board",
+                    1,
+                    "test-commit",
+                ),
+            )
+            snapshot = session.snapshot()
+            end = self._action(snapshot, "END_TURN")
+            review = session.apply_action(
+                end["id"],
+                expected_revision=snapshot["revision"],
+                elapsed_ms=10,
+            )
+            persisted = json.loads((Path(directory) / "current.json").read_text())
+            visual = human_arena_payload(session, ASSETS_PATH)
+
+        self.assertEqual(review["stage"], "battle_review")
+        self.assertEqual(persisted["stage"], "battle_review")
+        self.assertTrue(visual["battle"]["slides"])
+
     def test_terminal_episode_writes_audit_summary_and_starts_the_next_game(self):
         state = self._state_with_all_action_types()
         state.team = Team()
@@ -331,6 +388,10 @@ class HumanArenaSessionTest(unittest.TestCase):
             self.assertIn("test.callback", document)
             self.assertNotIn("<script>alert(1)</script>", document)
             self.assertIn("google.colab.kernel.invokeFunction", document)
+            self.assertIn('draggable="true"', document)
+            self.assertIn("front is right", document)
+            self.assertIn("function experienceLabel(pet)", document)
+            self.assertIn("ondragstart", document)
 
     def test_colab_adapter_registers_a_refreshable_callback(self):
         callbacks = {}

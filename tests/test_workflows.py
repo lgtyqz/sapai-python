@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import tempfile
@@ -7,9 +8,16 @@ from pathlib import Path
 from sapai.cli import _battle_dataset_for_sequence, _generate_episode_dataset
 from sapai.data.datasets import split_boards
 from sapai.data.replay import BoardSnapshot
-from sapai.data.serialization import read_boards, team_from_dict, write_boards
+from sapai.data.serialization import (
+    pet_from_dict,
+    pet_to_dict,
+    read_boards,
+    team_from_dict,
+    team_to_dict,
+    write_boards,
+)
 from sapai.sim.battle import BattleSimulator
-from sapai.sim.models import Team
+from sapai.sim.models import Pet, Team
 from sapai.sim.shop import ShopEnvironment
 from sapai.training.arena import (
     ArenaRunner,
@@ -174,6 +182,24 @@ class DatasetWorkflowTest(unittest.TestCase):
         self.assertFalse(replay_ids[0] & replay_ids[2])
         self.assertFalse(replay_ids[1] & replay_ids[2])
 
+    def test_nested_pet_metadata_is_json_safe_and_round_trips(self):
+        current_catalog = catalog()
+        whale = current_catalog.pet_by_name("Whale").create(instance_id=1)
+        swallowed = current_catalog.pet_by_name("Ant").create(instance_id=2)
+        whale.metadata["swallowed"] = [swallowed]
+
+        encoded = pet_to_dict(whale)
+        json.dumps(encoded)
+        restored = pet_from_dict(encoded)
+
+        self.assertIsInstance(restored.metadata["swallowed"][0], type(swallowed))
+        self.assertEqual(restored.metadata["swallowed"][0].name, "Ant")
+
+    def test_named_runtime_token_survives_team_serialization(self):
+        token = Pet(-1, "Ram", 3, 4, 4)
+        restored = team_from_dict(team_to_dict(Team.from_pets([token])))
+        self.assertEqual(restored.slots[0].name, "Ram")
+
 
 class ArenaWorkflowTest(unittest.TestCase):
     def setUp(self):
@@ -217,6 +243,8 @@ class ArenaWorkflowTest(unittest.TestCase):
         self.assertIn('src="sapai.js"', html)
         self.assertIn(".battlefield", stylesheet)
         self.assertIn("function battle(slide)", runtime)
+        self.assertIn("front is right", runtime)
+        self.assertIn("function experienceLabel(pet)", runtime)
         self.assertTrue(pet_assets_created)
 
     def test_battle_frames_and_token_sprite_mapping(self):

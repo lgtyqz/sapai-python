@@ -11,6 +11,32 @@ from sapai.data.replay import BoardSnapshot
 from sapai.sim.actions import Action, ActionKind
 from sapai.sim.models import Food, Pet, RunState, Shop, ShopPet, Team
 
+_METADATA_PET_KEY = "__sapai_serialized_pet__"
+
+
+def _metadata_to_json(value: Any) -> Any:
+    """Encode simulator metadata without discarding nested runtime pets."""
+
+    if isinstance(value, Pet):
+        return {_METADATA_PET_KEY: pet_to_dict(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _metadata_to_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_metadata_to_json(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(f"unsupported simulator metadata value: {type(value).__name__}")
+
+
+def _metadata_from_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        if set(value) == {_METADATA_PET_KEY}:
+            return pet_from_dict(value[_METADATA_PET_KEY])
+        return {str(key): _metadata_from_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_metadata_from_json(item) for item in value]
+    return value
+
 
 def pet_to_dict(pet: Pet) -> dict[str, Any]:
     return {
@@ -26,14 +52,16 @@ def pet_to_dict(pet: Pet) -> dict[str, Any]:
         "temporary_health": pet.temporary_health,
         "triggers_consumed": pet.triggers_consumed,
         "instance_id": pet.instance_id,
-        "metadata": pet.metadata,
+        "metadata": _metadata_to_json(pet.metadata),
     }
 
 
 def pet_from_dict(value: Mapping[str, Any]) -> Pet:
     pet_id = int(value["id"])
     name = str(value["name"])
-    metadata = dict(value.get("metadata", {}))
+    metadata = _metadata_from_json(value.get("metadata", {}))
+    if not isinstance(metadata, dict):
+        raise TypeError("serialized pet metadata must be an object")
     if pet_id >= 0 and name == f"Pet #{pet_id}":
         metadata.setdefault("vanilla_fallback", "unknown_pet_id")
     perk = value.get("perk")
@@ -61,14 +89,19 @@ def team_to_dict(team: Team) -> list[dict[str, Any] | None]:
 
 
 def team_from_dict(value: Iterable[Mapping[str, Any] | None]) -> Team:
-    return Team(
-        [
-            pet_from_dict(pet)
-            if pet is not None and int(pet.get("id", -1)) >= 0
-            else None
-            for pet in value
-        ]
-    )
+    return Team([_team_pet_from_dict(pet) for pet in value])
+
+
+def _team_pet_from_dict(value: Mapping[str, Any] | None) -> Pet | None:
+    if value is None:
+        return None
+    pet_id = int(value.get("id", -1))
+    # Historical exports used ``Pet #-1`` as an empty-slot sentinel. Runtime
+    # summons also use negative IDs, but their real token names must survive a
+    # battle-timeline round trip.
+    if pet_id < 0 and str(value.get("name", "")) == f"Pet #{pet_id}":
+        return None
+    return pet_from_dict(value)
 
 
 def action_to_dict(action: Action) -> dict[str, Any]:
@@ -167,7 +200,7 @@ def run_state_to_dict(state: RunState) -> dict[str, Any]:
         "next_reward_group": state.next_reward_group,
         "rolls_this_turn": state.rolls_this_turn,
         "gold_spent_this_turn": state.gold_spent_this_turn,
-        "metadata": state.metadata,
+        "metadata": _metadata_to_json(state.metadata),
     }
 
 
@@ -213,8 +246,15 @@ def run_state_from_dict(value: Mapping[str, Any]) -> RunState:
         next_reward_group=int(value.get("next_reward_group", 1)),
         rolls_this_turn=int(value.get("rolls_this_turn", 0)),
         gold_spent_this_turn=int(value.get("gold_spent_this_turn", 0)),
-        metadata=dict(value.get("metadata", {})),
+        metadata=_state_metadata_from_json(value.get("metadata", {})),
     )
+
+
+def _state_metadata_from_json(value: Any) -> dict[str, Any]:
+    metadata = _metadata_from_json(value)
+    if not isinstance(metadata, dict):
+        raise TypeError("serialized run-state metadata must be an object")
+    return metadata
 
 
 def write_jsonl(path: str | Path, rows: Iterable[Mapping[str, Any]]) -> int:

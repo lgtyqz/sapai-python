@@ -14,6 +14,7 @@
   let battleIndex = 0;
   let playTimer = null;
   let decisionStarted = performance.now();
+  let draggedTeamPosition = null;
 
   const escapeHtml = (value) => String(value ?? "").replace(
     /[&<>"']/g,
@@ -69,6 +70,13 @@
     return items.length ? `<div class="delta-stack">${items.join("")}</div>` : "";
   }
 
+  function experienceLabel(pet) {
+    const experience = Math.max(0, Number(pet.experience) || 0);
+    if (experience >= 5) return `Level 3 · XP ${experience}/5 (max)`;
+    const nextLevel = experience >= 2 ? 5 : 2;
+    return `Level ${pet.level} · XP ${experience}/${nextLevel}`;
+  }
+
   function petCard(pet, options = {}) {
     const classes = [
       "pet",
@@ -81,6 +89,8 @@
     ].filter(Boolean).join(" ");
     const attributes = [
       options.click ? `data-click="${escapeHtml(options.click)}"` : "",
+      options.teamPosition !== undefined ? `data-team-position="${options.teamPosition}"` : "",
+      options.draggable ? 'draggable="true"' : "",
       options.orderNumber ? `data-order-number="${options.orderNumber}"` : "",
       options.interactive ? 'role="button" tabindex="0"' : "",
     ].filter(Boolean).join(" ");
@@ -95,7 +105,7 @@
     return `<div class="${classes}" ${attributes} data-pet-id="${pet.visualId ?? ""}">
       <div class="stats"><span class="attack">${Math.max(0, pet.attack)}</span><span class="health">${Math.max(0, pet.health)}</span></div>
       ${deltas(pet)}${image}<div class="name">${escapeHtml(pet.name)}</div>
-      <div class="level">Level ${pet.level}</div>${perk}
+      <div class="level" title="Total experience">${experienceLabel(pet)}</div>${perk}
     </div>`;
   }
 
@@ -141,11 +151,33 @@
         front: position === 0,
         interactive: true,
         click: `team:${position}`,
+        teamPosition: position,
+        draggable: Boolean(pet) && view.stage === "shop" && !busy,
         selected: selected?.type === "team" && selected.index === position,
         legalTarget: targets.has(position),
         orderNumber: orderIndex >= 0 ? orderIndex + 1 : 0,
       });
-    }).join("");
+    }).reverse().join("");
+  }
+
+  function dragReorder(source, target, insertAfter) {
+    if (source === target) return;
+    const visualOrder = view.state.team.flatMap(
+      (pet, position) => pet ? [position] : [],
+    ).reverse();
+    const sourceIndex = visualOrder.indexOf(source);
+    if (sourceIndex < 0) return;
+    visualOrder.splice(sourceIndex, 1);
+    const targetIndex = visualOrder.indexOf(target);
+    if (targetIndex < 0) return;
+    visualOrder.splice(targetIndex + (insertAfter ? 1 : 0), 0, source);
+    const frontToBack = [...visualOrder].reverse();
+    const action = view.actions.find((candidate) =>
+      candidate.kind === "REORDER"
+        && candidate.order.length === frontToBack.length
+        && candidate.order.every((position, index) => position === frontToBack[index]),
+    );
+    if (action) invokeAction(action);
   }
 
   function actionButton(action, label, style = "") {
@@ -246,7 +278,7 @@
     return `${view.error ? `<div class="human-error">${escapeHtml(view.error)}</div>` : ""}
       <div class="label"><h2>Episode ${view.episode_index + 1} · Turn ${state.turn}</h2><span class="tag">Human shop</span></div>
       <div class="status"><span class="pill">Tier ${state.tier}</span><span class="pill">🪙 ${state.gold}</span><span class="pill">🏆 ${state.trophies}</span><span class="pill">❤️ ${state.lives}</span></div>
-      <div class="section-title">Team · front is left</div><div class="team">${renderTeam(state)}</div>
+      <div class="section-title">Team · front is right · drag pets to reorder</div><div class="team">${renderTeam(state)}</div>
       <div class="section-title">Shop offers</div><div class="shop"><div class="offers">${pets}</div><div class="foods">${foods}</div></div>
       ${contextPanel(state)}
       <div class="human-toolbar">
@@ -303,7 +335,7 @@
     return `${view.error ? `<div class="human-error">${escapeHtml(view.error)}</div>` : ""}
       <div class="label"><h2>Episode ${view.episode_index + 1} complete</h2><span class="tag">Human benchmark</span></div>
       <div class="status"><span class="pill">🏆 ${state.trophies} trophies</span><span class="pill">❤️ ${state.lives} lives</span><span class="pill">Turn ${state.turn}</span></div>
-      <div class="section-title">Final team · front is left</div><div class="team">${renderTeam(state)}</div>
+      <div class="section-title">Final team · front is right</div><div class="team">${renderTeam(state)}</div>
       ${summaryPanel(view.summary)}
       <div class="complete-actions"><button data-command="new-episode"${disabled()}>Start next game</button></div>
       <div class="benchmark-note">This completed game is immutable. Starting the next game advances the open-ended benchmark.</div>`;
@@ -390,6 +422,39 @@
     });
     root.querySelectorAll("[data-action]").forEach((element) => {
       element.onclick = () => invokeAction(actionById(element.dataset.action));
+    });
+    root.querySelectorAll('[data-team-position][draggable="true"]').forEach((element) => {
+      element.ondragstart = (event) => {
+        draggedTeamPosition = Number(element.dataset.teamPosition);
+        element.classList.add("is-dragging");
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", String(draggedTeamPosition));
+      };
+      element.ondragover = (event) => {
+        if (draggedTeamPosition === null) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        element.classList.add("drag-target");
+      };
+      element.ondragleave = () => element.classList.remove("drag-target");
+      element.ondrop = (event) => {
+        event.preventDefault();
+        element.classList.remove("drag-target");
+        if (draggedTeamPosition === null) return;
+        const bounds = element.getBoundingClientRect();
+        const insertAfter = event.clientX >= bounds.left + bounds.width / 2;
+        dragReorder(
+          draggedTeamPosition,
+          Number(element.dataset.teamPosition),
+          insertAfter,
+        );
+      };
+      element.ondragend = () => {
+        draggedTeamPosition = null;
+        root.querySelectorAll(".is-dragging, .drag-target").forEach(
+          (card) => card.classList.remove("is-dragging", "drag-target"),
+        );
+      };
     });
     root.querySelectorAll("[data-command]").forEach((element) => {
       const command = element.dataset.command;

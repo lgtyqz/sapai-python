@@ -188,8 +188,11 @@ class ShopEnvironment:
             new.shop.foods[action.source].freeze_toggled = True
         elif kind is ActionKind.SELL_PET:
             pet = new.team.slots[action.source]
-            self.abilities.on_sell(new, action.source, rng)
+            # The base sale payout happens before the pet's sell ability. In
+            # particular, a level-one Pig receives one base gold and then one
+            # additional gold from its ability.
             new.gold += pet.level  # type: ignore[union-attr]
+            self.abilities.on_sell(new, action.source, rng)
             new.team.slots[action.source] = None
         elif kind is ActionKind.REORDER:
             pets = [new.team.slots[index] for index in action.order]

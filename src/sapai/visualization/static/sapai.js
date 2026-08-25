@@ -58,6 +58,13 @@
     return items.length ? `<div class="delta-stack">${items.join("")}</div>` : "";
   }
 
+  function experienceLabel(pet) {
+    const experience = Math.max(0, Number(pet.experience) || 0);
+    if (experience >= 5) return `Level 3 · XP ${experience}/5 (max)`;
+    const nextLevel = experience >= 2 ? 5 : 2;
+    return `Level ${pet.level} · XP ${experience}/${nextLevel}`;
+  }
+
   function petCard(pet, options = {}) {
     if (!pet) {
       return '<div class="pet empty">Empty</div>';
@@ -71,7 +78,7 @@
     return `<div class="pet ${front ? "front" : ""} ${animationClasses(pet, options.side)}" data-pet-id="${pet.visualId ?? ""}">
       <div class="stats"><span class="attack">${Math.max(0, pet.attack)}</span><span class="health">${Math.max(0, pet.health)}</span></div>
       ${deltas(pet)}${image}<div class="name">${escapeHtml(pet.name)}</div>
-      <div class="level">Level ${pet.level}</div>${perk}
+      <div class="level" title="Total experience">${experienceLabel(pet)}</div>${perk}
     </div>`;
   }
 
@@ -84,8 +91,10 @@
   }
 
   function shopTeam(pets, title) {
-    const cards = pets.map((pet, position) => petCard(pet, {front: position === 0})).join("");
-    return `<div class="section-title">${title} · front is left</div><div class="team">${cards}</div>`;
+    const cards = pets.map(
+      (pet, position) => petCard(pet, {front: position === 0}),
+    ).reverse().join("");
+    return `<div class="section-title">${title} · front is right</div><div class="team">${cards}</div>`;
   }
 
   function battleTeam(pets, side) {

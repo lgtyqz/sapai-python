@@ -29,6 +29,21 @@
   box-shadow: 0 0 0 4px rgba(79, 143, 121, 0.25);
 }
 
+.interactive-card[draggable="true"] {
+  cursor: grab;
+}
+
+.interactive-card.is-dragging {
+  cursor: grabbing;
+  opacity: 0.45;
+  transform: scale(0.96);
+}
+
+.interactive-card.drag-target {
+  border-color: var(--gold);
+  box-shadow: inset 5px 0 0 var(--gold), 0 0 0 4px rgba(232, 180, 78, 0.22);
+}
+
 .interactive-card.legal-target {
   border-color: var(--gold);
   box-shadow: 0 0 0 4px rgba(232, 180, 78, 0.28);

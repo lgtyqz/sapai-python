@@ -5,6 +5,7 @@ from sapai.data.serialization import run_state_from_dict, run_state_to_dict
 from sapai.sim.actions import Action, ActionKind
 from sapai.sim.models import Food, Pet, Shop, ShopPet, Team
 from sapai.sim.shop import ShopEnvironment
+from sapai.sim.shop_abilities import ShopAbilityEngine
 from tests.helpers import catalog
 
 
@@ -28,6 +29,31 @@ class ShopEnvironmentTest(unittest.TestCase):
         self.assertEqual(rolled.shop.pets[0].pet.name, name)
         self.assertTrue(rolled.shop.pets[0].frozen)
         self.assertEqual(rolled.gold, 9)
+
+    def test_sale_gold_is_paid_before_the_sell_ability(self):
+        class ObservedSellAbilities(ShopAbilityEngine):
+            gold_when_ability_started = -1
+
+            def on_sell(self, state, index, rng):
+                self.gold_when_ability_started = state.gold
+                super().on_sell(state, index, rng)
+
+        abilities = ObservedSellAbilities(self.catalog)
+        environment = ShopEnvironment(self.catalog, abilities)
+        state = environment.reset(seed=4)
+        state.gold = 0
+        state.team = Team.from_pets([self.catalog.pet_by_name("Pig").create(instance_id=1)])
+        state.shop = Shop()
+
+        sold = environment.step(
+            state,
+            Action(ActionKind.SELL_PET, 0),
+            random.Random(1),
+        ).state
+
+        self.assertEqual(abilities.gold_when_ability_started, 1)
+        self.assertEqual(sold.gold, 2)
+        self.assertIsNone(sold.team.slots[0])
 
     def test_freeze_decision_cannot_be_reversed_until_the_next_roll(self):
         state = self.environment.reset(seed=4)
