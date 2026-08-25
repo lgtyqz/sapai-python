@@ -167,6 +167,21 @@ completed episodes plus an aggregate `summary.json` to Drive. Rerun the final
 cell after reconnecting because Colab callbacks belong to the current runtime.
 Human benchmark artifacts are kept separate from policy-training datasets.
 
+### Kaggle notebook
+
+[`notebooks/sapai_kaggle_training.ipynb`](notebooks/sapai_kaggle_training.ipynb)
+provides the same smoke run, resumable full-training sequence, portable replay,
+and human Arena benchmark for Kaggle. It uses `/kaggle/working` for writable
+outputs, `kaggle_secrets.UserSecretsClient` for `DATABASE_URL`, and a standard
+Jupyter widget channel for the interactive card UI.
+
+To continue from a saved Kaggle notebook version, attach that version as an
+input and set `KAGGLE_PRIOR_RUN_DIR` or `KAGGLE_PRIOR_HUMAN_DIR` to the relevant
+directory under `/kaggle/input`. The notebook copies it into writable storage
+without replacing a newer in-session directory. Enable Internet for the Git
+checkout, dependency installation, and database export; an attached
+`boards.jsonl` avoids the database step.
+
 ## Stable SAP Library data
 
 Do not copy an existing `.env` into the repository. Set the Neon URL in the

@@ -16,6 +16,7 @@ from sapai.visualization.html import _battle_slide, _collect_names, _state
 
 HUMAN_TEMPLATE_NAME = "human_arena.html"
 HUMAN_SCRIPT_NAME = "human_arena.js"
+HUMAN_COLAB_SCRIPT_NAME = "human_arena_colab.js"
 HUMAN_STYLESHEET_NAME = "human_arena.css"
 
 
@@ -71,7 +72,12 @@ def build_human_arena_html(
     template = resources.joinpath(HUMAN_TEMPLATE_NAME).read_text(encoding="utf-8")
     base_css = resources.joinpath("sapai.css").read_text(encoding="utf-8")
     human_css = resources.joinpath(HUMAN_STYLESHEET_NAME).read_text(encoding="utf-8")
-    script = resources.joinpath(HUMAN_SCRIPT_NAME).read_text(encoding="utf-8")
+    script = "\n".join(
+        (
+            resources.joinpath(HUMAN_SCRIPT_NAME).read_text(encoding="utf-8"),
+            resources.joinpath(HUMAN_COLAB_SCRIPT_NAME).read_text(encoding="utf-8"),
+        )
+    )
     payload = {
         "callbackName": callback_name,
         "view": human_arena_payload(session, assets_root),
@@ -101,29 +107,40 @@ def display_human_arena(
     callback_name = f"sapai.human_arena.{uuid.uuid4().hex}"
 
     def callback(command: str, arguments: dict[str, Any] | None = None):
-        values = arguments or {}
-        try:
-            if command == "action":
-                session.apply_action(
-                    str(values["action_id"]),
-                    expected_revision=int(values["revision"]),
-                    elapsed_ms=float(values["elapsed_ms"]),
-                )
-            elif command == "continue":
-                session.continue_battle(expected_revision=int(values["revision"]))
-            elif command == "new_episode":
-                session.new_episode(expected_revision=int(values["revision"]))
-            elif command != "refresh":
-                raise ValueError(f"unknown human Arena command: {command!r}")
-            response = human_arena_payload(session, assets_root)
-        except (KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
-            response = human_arena_payload(session, assets_root)
-            response["error"] = str(error)
-        return JSON(response)
+        return JSON(human_arena_command(session, assets_root, command, arguments))
 
     output.register_callback(callback_name, callback)
     display(HTML(build_human_arena_html(session, assets_root, callback_name=callback_name)))
     return callback_name
+
+
+def human_arena_command(
+    session: HumanArenaSession,
+    assets_root: str | Path,
+    command: str,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply one UI command and return a refreshed, error-bearing view."""
+
+    values = arguments or {}
+    try:
+        if command == "action":
+            session.apply_action(
+                str(values["action_id"]),
+                expected_revision=int(values["revision"]),
+                elapsed_ms=float(values["elapsed_ms"]),
+            )
+        elif command == "continue":
+            session.continue_battle(expected_revision=int(values["revision"]))
+        elif command == "new_episode":
+            session.new_episode(expected_revision=int(values["revision"]))
+        elif command != "refresh":
+            raise ValueError(f"unknown human Arena command: {command!r}")
+        response = human_arena_payload(session, assets_root)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        response = human_arena_payload(session, assets_root)
+        response["error"] = str(error)
+    return response
 
 
 def _battle_result_from_dict(value: dict[str, Any]) -> BattleResult:

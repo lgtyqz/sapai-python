@@ -23,6 +23,7 @@ from sapai.visualization.colab import (
     display_human_arena,
     human_arena_payload,
 )
+from sapai.visualization.widget import display_human_arena_widget
 from tests.helpers import DATA_PATH, catalog
 
 ASSETS_PATH = DATA_PATH.parent
@@ -427,6 +428,51 @@ class HumanArenaSessionTest(unittest.TestCase):
             refreshed = callbacks[callback_name]("refresh", {})
             self.assertEqual(refreshed.data["stage"], "shop")
 
+    def test_standard_jupyter_widget_adapter_uses_synced_commands(self):
+        displayed = []
+
+        class FakeAnyWidget:
+            def __init__(self, **values):
+                for key, value in values.items():
+                    setattr(self, key, value)
+
+        class FakeTrait:
+            def tag(self, **_metadata):
+                return self
+
+        fake_anywidget = types.ModuleType("anywidget")
+        fake_anywidget.AnyWidget = FakeAnyWidget
+        fake_traitlets = types.ModuleType("traitlets")
+        fake_traitlets.Dict = FakeTrait
+        fake_traitlets.observe = lambda *_names: lambda method: method
+        fake_ipython = types.ModuleType("IPython")
+        fake_display = types.ModuleType("IPython.display")
+        fake_display.display = displayed.append
+
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(directory)
+            with patch.dict(
+                sys.modules,
+                {
+                    "anywidget": fake_anywidget,
+                    "traitlets": fake_traitlets,
+                    "IPython": fake_ipython,
+                    "IPython.display": fake_display,
+                },
+            ):
+                widget = display_human_arena_widget(session, ASSETS_PATH)
+            widget._handle_request(
+                {"new": {"id": "request-1", "command": "refresh", "parameters": {}}}
+            )
+
+        self.assertEqual(displayed, [widget])
+        self.assertEqual(widget.response, {"id": "request-1"})
+        self.assertEqual(widget.view["stage"], "shop")
+        self.assertIn("function mountHumanArena", widget._esm)
+        self.assertIn("export default", widget._esm)
+        self.assertIn(".human-toolbar", widget._css)
+        self.assertIn("@scope (.sapai-human-output)", widget._css)
+
     def test_shared_population_loader_applies_the_model_pack_filter(self):
         ant = self.catalog.pet_by_name("Ant").create()
         boards = [
@@ -452,6 +498,25 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("load_opponent_population(BOARDS_FOR_RUN", launcher)
         self.assertIn("display_human_arena", launcher)
         ast.parse(launcher)
+
+    def test_kaggle_notebook_is_native_guarded_and_parseable(self):
+        path = Path(__file__).resolve().parents[1] / "notebooks" / "sapai_kaggle_training.ipynb"
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+        self.assertIn("RUN_HUMAN_BENCHMARK = False", source)
+        self.assertIn("/kaggle/working", source)
+        self.assertIn("KAGGLE_PRIOR_RUN_DIR", source)
+        self.assertIn("UserSecretsClient().get_secret('DATABASE_URL')", source)
+        self.assertIn("display_human_arena_widget", source)
+        self.assertNotIn("google.colab", source)
+        self.assertNotIn("/content/", source)
+        for cell in notebook["cells"]:
+            if cell["cell_type"] != "code":
+                continue
+            code = "".join(cell.get("source", []))
+            if code.startswith("%pip "):
+                code = "\n".join(code.splitlines()[1:])
+            ast.parse(code)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,8 @@
-(() => {
+function mountHumanArena(root, initialView, invokeCommand, platformName) {
   "use strict";
 
-  const script = document.currentScript;
-  const dataElement = script.previousElementSibling;
-  const root = dataElement.previousElementSibling.previousElementSibling;
-  const bootstrap = JSON.parse(dataElement.textContent);
-  const callbackName = bootstrap.callbackName;
-  let view = bootstrap.view;
+  platformName = platformName || "Notebook";
+  let view = initialView;
   let busy = false;
   let selected = null;
   let reorderMode = false;
@@ -378,19 +374,14 @@
     stopPlayback();
     render();
     try {
-      const response = await google.colab.kernel.invokeFunction(
-        callbackName,
-        [command, parameters],
-        {},
-      );
-      view = response.data["application/json"];
+      view = await invokeCommand(command, parameters);
       selected = null;
       reorderMode = false;
       reorderOrder = [];
       battleIndex = 0;
       decisionStarted = performance.now();
     } catch (error) {
-      view.error = `Colab callback failed: ${error}`;
+      view.error = `${platformName} callback failed: ${error}`;
     } finally {
       busy = false;
       render();
@@ -514,4 +505,5 @@
   }
 
   render();
-})();
+  return stopPlayback;
+}
