@@ -51,6 +51,12 @@ class ShopEnvironment:
     def roll_shop(self, state: RunState, rng: random.Random) -> Shop:
         frozen_pets = [offer.clone() for offer in state.shop.pets if offer.frozen]
         frozen_foods = [food.clone() for food in state.shop.foods if food.frozen]
+        # A roll is the boundary between freeze decisions. Within one shop,
+        # toggling an offer twice only returns to an already-seen state.
+        for offer in frozen_pets:
+            offer.freeze_toggled = False
+        for food in frozen_foods:
+            food.freeze_toggled = False
         pet_pool = self.catalog.pack_pets(state.pack, through_tier=state.tier)
         food_pool = self.catalog.pack_foods(state.pack, through_tier=state.tier)
         if not pet_pool or not food_pool:
@@ -85,12 +91,13 @@ class ShopEnvironment:
                     if state.team.slots[target].id == offer.pet.id  # type: ignore[union-attr]
                     and state.team.slots[target].level < 3  # type: ignore[union-attr]
                 )
-            actions.append(
-                Action(
-                    ActionKind.UNFREEZE_PET if offer.frozen else ActionKind.FREEZE_PET,
-                    shop_index,
+            if not offer.freeze_toggled:
+                actions.append(
+                    Action(
+                        ActionKind.UNFREEZE_PET if offer.frozen else ActionKind.FREEZE_PET,
+                        shop_index,
+                    )
                 )
-            )
 
         for food_index, food in enumerate(state.shop.foods):
             if state.gold >= food.cost:
@@ -98,12 +105,13 @@ class ShopEnvironment:
                 actions.extend(
                     Action(ActionKind.BUY_FOOD, food_index, target) for target in targets
                 )
-            actions.append(
-                Action(
-                    ActionKind.UNFREEZE_FOOD if food.frozen else ActionKind.FREEZE_FOOD,
-                    food_index,
+            if not food.freeze_toggled:
+                actions.append(
+                    Action(
+                        ActionKind.UNFREEZE_FOOD if food.frozen else ActionKind.FREEZE_FOOD,
+                        food_index,
+                    )
                 )
-            )
 
         for source in occupied:
             actions.append(Action(ActionKind.SELL_PET, source))
@@ -174,8 +182,10 @@ class ShopEnvironment:
             new.shop = self.roll_shop(new, rng)
         elif kind in {ActionKind.FREEZE_PET, ActionKind.UNFREEZE_PET}:
             new.shop.pets[action.source].frozen = kind is ActionKind.FREEZE_PET
+            new.shop.pets[action.source].freeze_toggled = True
         elif kind in {ActionKind.FREEZE_FOOD, ActionKind.UNFREEZE_FOOD}:
             new.shop.foods[action.source].frozen = kind is ActionKind.FREEZE_FOOD
+            new.shop.foods[action.source].freeze_toggled = True
         elif kind is ActionKind.SELL_PET:
             pet = new.team.slots[action.source]
             self.abilities.on_sell(new, action.source, rng)

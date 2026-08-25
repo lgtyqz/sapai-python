@@ -166,9 +166,28 @@ class PolicyGuidedSearch:
             node.value_sum += value
             return value
 
-        edge = max(node.edges.values(), key=lambda candidate: self._puct(node, candidate))
-        child = self._outcome(node, edge, rng)
-        value = self._simulate(child, rng, seen=seen | {key}, depth=depth + 1)
+        path = seen | {key}
+        edge = None
+        child = None
+        for candidate in sorted(
+            node.edges.values(),
+            key=lambda item: self._puct(node, item),
+            reverse=True,
+        ):
+            candidate_child = self._outcome(node, candidate, rng)
+            if candidate_child.state.canonical_key() in path:
+                continue
+            edge = candidate
+            child = candidate_child
+            break
+        if edge is None or child is None:
+            # Every candidate returns to an ancestor. Treat this branch as a
+            # leaf rather than spending the search budget on a reversible loop.
+            value = node.value_prior
+            node.visits += 1
+            node.value_sum += value
+            return value
+        value = self._simulate(child, rng, seen=path, depth=depth + 1)
         edge.visits += 1
         edge.value_sum += value
         node.visits += 1

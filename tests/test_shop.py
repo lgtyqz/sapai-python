@@ -1,6 +1,7 @@
 import random
 import unittest
 
+from sapai.data.serialization import run_state_from_dict, run_state_to_dict
 from sapai.sim.actions import Action, ActionKind
 from sapai.sim.models import Food, Pet, Shop, ShopPet, Team
 from sapai.sim.shop import ShopEnvironment
@@ -27,6 +28,55 @@ class ShopEnvironmentTest(unittest.TestCase):
         self.assertEqual(rolled.shop.pets[0].pet.name, name)
         self.assertTrue(rolled.shop.pets[0].frozen)
         self.assertEqual(rolled.gold, 9)
+
+    def test_freeze_decision_cannot_be_reversed_until_the_next_roll(self):
+        state = self.environment.reset(seed=4)
+        freeze_pet = Action(ActionKind.FREEZE_PET, 0)
+        freeze_food = Action(ActionKind.FREEZE_FOOD, 0)
+
+        state = self.environment.step(state, freeze_pet, random.Random(1)).state
+        state = self.environment.step(state, freeze_food, random.Random(1)).state
+        actions = self.environment.legal_actions(state)
+        self.assertNotIn(Action(ActionKind.UNFREEZE_PET, 0), actions)
+        self.assertNotIn(Action(ActionKind.UNFREEZE_FOOD, 0), actions)
+
+        restored = run_state_from_dict(run_state_to_dict(state))
+        restored_actions = self.environment.legal_actions(restored)
+        self.assertNotIn(Action(ActionKind.UNFREEZE_PET, 0), restored_actions)
+        self.assertNotIn(Action(ActionKind.UNFREEZE_FOOD, 0), restored_actions)
+
+        state = self.environment.step(state, Action(ActionKind.ROLL), random.Random(2)).state
+        actions = self.environment.legal_actions(state)
+        self.assertIn(Action(ActionKind.UNFREEZE_PET, 0), actions)
+        self.assertIn(Action(ActionKind.UNFREEZE_FOOD, 0), actions)
+
+    def test_zero_gold_freeze_actions_cannot_cycle(self):
+        state = self.environment.reset(seed=4)
+        state.team = Team()
+        state.gold = 0
+        seen = {state.canonical_key()}
+
+        while True:
+            actions = self.environment.legal_actions(state)
+            toggles = [
+                action
+                for action in actions
+                if action.kind
+                in {
+                    ActionKind.FREEZE_PET,
+                    ActionKind.UNFREEZE_PET,
+                    ActionKind.FREEZE_FOOD,
+                    ActionKind.UNFREEZE_FOOD,
+                }
+            ]
+            if not toggles:
+                break
+            state = self.environment.step(state, toggles[0], random.Random(1)).state
+            self.assertNotIn(state.canonical_key(), seen)
+            seen.add(state.canonical_key())
+
+        self.assertEqual(len(seen), 1 + len(state.shop.pets) + len(state.shop.foods))
+        self.assertEqual(self.environment.legal_actions(state), [Action(ActionKind.END_TURN)])
 
     def test_buy_targets_are_explicit(self):
         state = self.environment.reset(seed=4)

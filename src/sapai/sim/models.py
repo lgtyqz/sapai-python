@@ -127,6 +127,7 @@ class Food:
     targets_pet: bool = True
     frozen: bool = False
     reward_group: int | None = None
+    freeze_toggled: bool = False
 
     def clone(self) -> Food:
         return copy.deepcopy(self)
@@ -137,6 +138,7 @@ class ShopPet:
     pet: Pet
     frozen: bool = False
     reward_group: int | None = None
+    freeze_toggled: bool = False
 
     def clone(self) -> ShopPet:
         return copy.deepcopy(self)

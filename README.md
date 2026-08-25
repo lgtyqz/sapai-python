@@ -267,6 +267,11 @@ python -m sapai.cli train-policy \
 The second policy command resumes the 20-epoch checkpoint and trains through
 epoch 25, so it performs five distillation epochs.
 
+Freeze choices are canonicalized once per shop roll: changing an offer's
+frozen state removes its inverse action until the next roll. MCTS also skips
+deterministic transitions back to an ancestor, so zero-cost action cycles do
+not consume rollout depth or become policy targets.
+
 ### One-command version
 
 ```bash

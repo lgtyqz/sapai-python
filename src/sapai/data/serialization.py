@@ -136,6 +136,7 @@ def run_state_to_dict(state: RunState) -> dict[str, Any]:
                     "pet": pet_to_dict(offer.pet),
                     "frozen": offer.frozen,
                     "reward_group": offer.reward_group,
+                    "freeze_toggled": offer.freeze_toggled,
                 }
                 for offer in state.shop.pets
             ],
@@ -148,6 +149,7 @@ def run_state_to_dict(state: RunState) -> dict[str, Any]:
                     "targets_pet": food.targets_pet,
                     "frozen": food.frozen,
                     "reward_group": food.reward_group,
+                    "freeze_toggled": food.freeze_toggled,
                 }
                 for food in state.shop.foods
             ],
@@ -177,6 +179,7 @@ def run_state_from_dict(value: Mapping[str, Any]) -> RunState:
                 pet_from_dict(offer["pet"]),
                 frozen=bool(offer.get("frozen", False)),
                 reward_group=offer.get("reward_group"),
+                freeze_toggled=bool(offer.get("freeze_toggled", False)),
             )
             for offer in raw_shop.get("pets", [])
         ],
@@ -189,6 +192,7 @@ def run_state_from_dict(value: Mapping[str, Any]) -> RunState:
                 targets_pet=bool(food.get("targets_pet", True)),
                 frozen=bool(food.get("frozen", False)),
                 reward_group=food.get("reward_group"),
+                freeze_toggled=bool(food.get("freeze_toggled", False)),
             )
             for food in raw_shop.get("foods", [])
         ],
