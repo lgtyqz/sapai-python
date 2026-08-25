@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 try:
     import numpy as np
@@ -9,6 +11,8 @@ except ModuleNotFoundError:
 
 from sapai.ml.encoding import encode_states, encode_teams
 from sapai.ml.models import BattleModel, ModelConfig, PolicyValueModel, PolicyValueTrainer
+from sapai.ml.pipelines import _restore_training_checkpoint
+from sapai.ml.training import BattleTrainer
 from sapai.sim.models import Team
 from sapai.sim.shop import ShopEnvironment
 from tests.helpers import catalog
@@ -54,6 +58,72 @@ class TensorFlowModelTest(unittest.TestCase):
         self.assertAlmostEqual(
             float(tf.reduce_sum(outputs["probabilities"]).numpy()), 1.0, places=5
         )
+
+    def test_legacy_checkpoint_restores_model_and_optimizer_before_next_epoch(self):
+        ant = catalog().pet_by_name("Ant").create()
+        fish = catalog().pet_by_name("Fish").create()
+        player = encode_teams([Team.from_pets([ant])])
+        opponent = encode_teams([Team.from_pets([fish])])
+        inputs = {
+            **{f"player_{key}": tf.convert_to_tensor(value) for key, value in player.items()},
+            **{
+                f"opponent_{key}": tf.convert_to_tensor(value)
+                for key, value in opponent.items()
+            },
+        }
+        targets = tf.convert_to_tensor([[1.0, 0.0, 0.0]])
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            source_model = BattleModel(self.config)
+            source_model(inputs, training=False)
+            source_optimizer = tf.keras.optimizers.AdamW(3e-4)
+            BattleTrainer(source_model, source_optimizer).train_step(inputs, targets)
+            source_epoch = tf.Variable(1, dtype=tf.int64, trainable=False)
+            source_checkpoint = tf.train.Checkpoint(
+                model=source_model,
+                optimizer=source_optimizer,
+                completed_epochs=source_epoch,
+            )
+            source_manager = tf.train.CheckpointManager(
+                source_checkpoint,
+                str(output / "checkpoints"),
+                max_to_keep=3,
+            )
+            source_manager.save(checkpoint_number=1)
+            expected = [value.numpy().copy() for value in source_model.trainable_variables]
+
+            target_model = BattleModel(self.config)
+            target_model(inputs, training=False)
+            target_optimizer = tf.keras.optimizers.AdamW(3e-4)
+            target_epoch = tf.Variable(0, dtype=tf.int64, trainable=False)
+            target_checkpoint = tf.train.Checkpoint(
+                model=target_model,
+                optimizer=target_optimizer,
+                completed_epochs=target_epoch,
+            )
+            target_manager = tf.train.CheckpointManager(
+                target_checkpoint,
+                str(output / "checkpoints"),
+                max_to_keep=3,
+            )
+            restored_epoch, restored_path = _restore_training_checkpoint(
+                tf,
+                model=target_model,
+                optimizer=target_optimizer,
+                completed_epochs=target_epoch,
+                manager=target_manager,
+                output=output,
+                resume=True,
+            )
+
+        self.assertEqual(restored_epoch, 1)
+        self.assertIsNotNone(restored_path)
+        self.assertEqual(int(target_optimizer.iterations.numpy()), 1)
+        for expected_value, restored_value in zip(
+            expected, target_model.trainable_variables, strict=True
+        ):
+            np.testing.assert_allclose(restored_value.numpy(), expected_value)
 
 
 if __name__ == "__main__":

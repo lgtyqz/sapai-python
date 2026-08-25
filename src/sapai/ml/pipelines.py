@@ -66,6 +66,65 @@ def _write_run_metadata(
     )
 
 
+def _epoch_weights_path(output: Path, epoch: int) -> Path:
+    return output / "checkpoints" / f"epoch-{epoch}.weights.h5"
+
+
+def _save_epoch_weights(model, output: Path, epoch: int, checkpoints: list[str]) -> None:
+    destination = _epoch_weights_path(output, epoch)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"epoch-{epoch}.tmp.weights.h5")
+    model.save_weights(temporary)
+    temporary.replace(destination)
+    keep = {int(Path(path).name.rsplit("-", 1)[-1]) for path in checkpoints}
+    keep.add(epoch)
+    for path in destination.parent.glob("epoch-*.weights.h5"):
+        name = path.name.removesuffix(".weights.h5")
+        if name.endswith(".tmp"):
+            continue
+        saved_epoch = int(name.rsplit("-", 1)[-1])
+        if saved_epoch not in keep:
+            path.unlink()
+
+
+def _restore_training_checkpoint(
+    tf,
+    *,
+    model,
+    optimizer,
+    completed_epochs,
+    manager,
+    output: Path,
+    resume: bool,
+) -> tuple[int, str | None]:
+    if not resume or not manager.latest_checkpoint:
+        return 0, None
+
+    # Keras 3 checkpoints expose model variables through the optimizer's tracked
+    # trainable-variable list. Build slots before restore so those tensors match
+    # immediately instead of remaining deferred while only the epoch counter loads.
+    optimizer.build(model.trainable_variables)
+    checkpoint = tf.train.Checkpoint(
+        model=model,
+        optimizer=optimizer,
+        completed_epochs=completed_epochs,
+    )
+    status = checkpoint.restore(manager.latest_checkpoint)
+    status.assert_existing_objects_matched()
+    restored_epoch = int(completed_epochs.numpy())
+    checkpoint_epoch = int(Path(manager.latest_checkpoint).name.rsplit("-", 1)[-1])
+    if checkpoint_epoch != restored_epoch:
+        raise RuntimeError(
+            f"checkpoint epoch mismatch: file={checkpoint_epoch}, state={restored_epoch}"
+        )
+    if restored_epoch > 0 and int(optimizer.iterations.numpy()) == 0:
+        raise RuntimeError("checkpoint restored an epoch counter but no optimizer progress")
+    explicit_weights = _epoch_weights_path(output, restored_epoch)
+    if explicit_weights.exists():
+        model.load_weights(explicit_weights)
+    return restored_epoch, manager.latest_checkpoint
+
+
 def train_battle_model(
     dataset_dir: str | Path,
     output_dir: str | Path,
@@ -100,6 +159,7 @@ def train_battle_model(
     trainer = BattleTrainer(model, optimizer)
     sample_inputs, _ = encode_battle_examples(train[:1])
     model(_tensor_dict(tf, sample_inputs), training=False)
+    optimizer.build(model.trainable_variables)
     completed_epochs = tf.Variable(0, dtype=tf.int64, trainable=False)
     checkpoint = tf.train.Checkpoint(
         model=model,
@@ -107,8 +167,15 @@ def train_battle_model(
         completed_epochs=completed_epochs,
     )
     manager = tf.train.CheckpointManager(checkpoint, str(output / "checkpoints"), max_to_keep=3)
-    if resume and manager.latest_checkpoint:
-        checkpoint.restore(manager.latest_checkpoint).expect_partial()
+    restored_epoch, restored_checkpoint = _restore_training_checkpoint(
+        tf,
+        model=model,
+        optimizer=optimizer,
+        completed_epochs=completed_epochs,
+        manager=manager,
+        output=output,
+        resume=resume,
+    )
 
     rng = random.Random(training.seed + int(completed_epochs.numpy()))
     history = _read_history(output)
@@ -126,11 +193,14 @@ def train_battle_model(
             row.update(_evaluate_battle(tf, model, validation, training.batch_size))
         history.append(row)
         completed_epochs.assign(epoch + 1)
+        _save_epoch_weights(model, output, epoch + 1, manager.checkpoints)
         manager.save(checkpoint_number=epoch + 1)
         _save_history(output, history)
     model.save_weights(output / "battle.weights.h5")
     return {
         "epochs": int(completed_epochs.numpy()),
+        "restored_from_epoch": restored_epoch,
+        "restored_checkpoint": restored_checkpoint,
         "train_examples": len(train),
         "validation_examples": len(validation),
         "checkpoint": manager.latest_checkpoint,
@@ -233,6 +303,7 @@ def train_policy_model(
     trainer = PolicyValueTrainer(model, optimizer)
     sample_inputs, _ = _policy_batch(tf, train[:1], training.max_actions)
     model(sample_inputs, training=False)
+    optimizer.build(model.trainable_variables)
     completed_epochs = tf.Variable(0, dtype=tf.int64, trainable=False)
     checkpoint = tf.train.Checkpoint(
         model=model,
@@ -240,8 +311,15 @@ def train_policy_model(
         completed_epochs=completed_epochs,
     )
     manager = tf.train.CheckpointManager(checkpoint, str(output / "checkpoints"), max_to_keep=3)
-    if resume and manager.latest_checkpoint:
-        checkpoint.restore(manager.latest_checkpoint).expect_partial()
+    restored_epoch, restored_checkpoint = _restore_training_checkpoint(
+        tf,
+        model=model,
+        optimizer=optimizer,
+        completed_epochs=completed_epochs,
+        manager=manager,
+        output=output,
+        resume=resume,
+    )
 
     rng = random.Random(training.seed + int(completed_epochs.numpy()))
     history = _read_history(output)
@@ -264,11 +342,14 @@ def train_policy_model(
             )
         history.append(row)
         completed_epochs.assign(epoch + 1)
+        _save_epoch_weights(model, output, epoch + 1, manager.checkpoints)
         manager.save(checkpoint_number=epoch + 1)
         _save_history(output, history)
     model.save_weights(output / "policy.weights.h5")
     return {
         "epochs": int(completed_epochs.numpy()),
+        "restored_from_epoch": restored_epoch,
+        "restored_checkpoint": restored_checkpoint,
         "train_examples": len(train),
         "validation_examples": len(validation),
         "checkpoint": manager.latest_checkpoint,

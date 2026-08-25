@@ -294,6 +294,12 @@ datasets and rollout episodes and restores model plus optimizer state from the
 latest epoch checkpoint. Only an epoch interrupted before its checkpoint is
 repeated.
 
+Keras optimizer slots are built before checkpoint restoration so model tensors
+tracked through Keras 3 optimizers are matched immediately. Each newly completed
+epoch also writes an explicit `epoch-N.weights.h5` model snapshot beside the
+TensorFlow optimizer/epoch checkpoint, and resume validates that checkpoint
+number, completed epoch, and optimizer progress agree.
+
 ## Google Colab
 
 Open `notebooks/sapai_colab_training.ipynb`, choose a T4 GPU runtime, add a
