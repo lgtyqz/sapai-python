@@ -323,8 +323,65 @@ def _generate_episode_dataset(
     return write_arena_decisions(output, combined)
 
 
-def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
+def _battle_dataset_for_sequence(
+    boards,
+    output: Path,
+    simulator: BattleSimulator,
+    *,
+    examples: int,
+    simulations_per_pair: int,
+    seed: int,
+    pack: str,
+    boards_sha256: str,
+) -> dict[str, object]:
     from sapai.data.datasets import build_battle_dataset
+
+    identity = {
+        "format": "sapai-sequence-battle-input-v1",
+        "boards_sha256": boards_sha256,
+        "pack": pack,
+        "examples": examples,
+        "simulations_per_pair": simulations_per_pair,
+        "seed": seed,
+    }
+    identity_path = output / "sequence-input.json"
+    manifest_path = output / "manifest.json"
+    split_paths = [output / f"{name}.jsonl" for name in ("train", "validation", "test")]
+    if manifest_path.exists() and all(path.exists() for path in split_paths):
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        counts = manifest.get("examples", {})
+        legacy_matches = (
+            manifest.get("format") == "sapai-battle-dataset-v1"
+            and manifest.get("seed") == seed
+            and manifest.get("simulations_per_pair") == simulations_per_pair
+            and sum(int(counts.get(name, 0)) for name in ("train", "validation", "test"))
+            == examples
+        )
+        if not legacy_matches:
+            raise ValueError(f"battle dataset settings changed in {output}; use a new workdir")
+        if identity_path.exists():
+            existing_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+            if existing_identity != identity:
+                raise ValueError(
+                    f"battle dataset input changed in {output}; use a new workdir"
+                )
+        else:
+            identity_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+        return manifest
+
+    manifest = build_battle_dataset(
+        boards,
+        output,
+        simulator,
+        examples=examples,
+        simulations_per_pair=simulations_per_pair,
+        seed=seed,
+    )
+    identity_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+    return manifest
+
+
+def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     from sapai.ml.pipelines import train_battle_model, train_policy_model
 
     root = Path(args.workdir)
@@ -338,13 +395,15 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         raise ValueError(f"board dataset contains no {args.pack!r} boards")
     boards_sha256 = _file_sha256(args.boards)
     battle_dataset = root / "battle-dataset"
-    manifest = build_battle_dataset(
+    manifest = _battle_dataset_for_sequence(
         boards,
         battle_dataset,
         BattleSimulator(catalog),
         examples=args.battle_examples,
         simulations_per_pair=args.simulations_per_pair,
         seed=args.seed,
+        pack=args.pack,
+        boards_sha256=boards_sha256,
     )
     battle_summary = train_battle_model(
         battle_dataset,

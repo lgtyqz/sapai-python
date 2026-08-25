@@ -288,6 +288,12 @@ Outputs include manifests, model configs, rolling checkpoints, final weights,
 training histories, opponent tensors, resumable per-episode rollout files, both
 combined trajectory datasets, and a final `summary.json`.
 
+After a Colab disconnect, reconnect with the same `DRIVE_RUN_DIR`, board export,
+seed, and data-generation counts. Rerunning `train-sequence` reuses completed
+datasets and rollout episodes and restores model plus optimizer state from the
+latest epoch checkpoint. Only an epoch interrupted before its checkpoint is
+repeated.
+
 ## Google Colab
 
 Open `notebooks/sapai_colab_training.ipynb`, choose a T4 GPU runtime, add a

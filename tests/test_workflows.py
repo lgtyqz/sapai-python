@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sapai.cli import _generate_episode_dataset
+from sapai.cli import _battle_dataset_for_sequence, _generate_episode_dataset
 from sapai.data.datasets import split_boards
 from sapai.data.replay import BoardSnapshot
 from sapai.data.serialization import read_boards, team_from_dict, write_boards
@@ -41,6 +41,44 @@ class CliWorkflowTest(unittest.TestCase):
 
 
 class DatasetWorkflowTest(unittest.TestCase):
+    def test_training_sequence_reuses_completed_battle_dataset(self):
+        ant = catalog().pet_by_name("Ant").create()
+        boards = [
+            BoardSnapshot(
+                f"run-{index // 2}",
+                "player" if index % 2 == 0 else "opponent",
+                2,
+                "Turtle",
+                Team.from_pets([ant]),
+                version="test",
+            )
+            for index in range(100)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "battle-dataset"
+            first = _battle_dataset_for_sequence(
+                boards,
+                output,
+                BattleSimulator(catalog()),
+                examples=10,
+                simulations_per_pair=1,
+                seed=4,
+                pack="Turtle",
+                boards_sha256="test-input",
+            )
+            second = _battle_dataset_for_sequence(
+                boards,
+                output,
+                None,
+                examples=10,
+                simulations_per_pair=1,
+                seed=4,
+                pack="Turtle",
+                boards_sha256="test-input",
+            )
+
+        self.assertEqual(second, first)
+
     def test_board_snapshot_normalizes_negative_pet_id(self):
         ant = catalog().pet_by_name("Ant").create()
         ant.id = -1
