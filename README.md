@@ -173,7 +173,11 @@ Human benchmark artifacts are kept separate from policy-training datasets.
 provides the same smoke run, resumable full-training sequence, portable replay,
 and human Arena benchmark for Kaggle. It uses `/kaggle/working` for writable
 outputs, `kaggle_secrets.UserSecretsClient` for `DATABASE_URL`, and a standard
-Jupyter widget channel for the interactive card UI.
+Jupyter widget channel for the interactive card UI. The Kaggle UI uses only
+the core `ipywidgets` models already bundled by Kaggle; it does not require a
+separately registered AnyWidget frontend module. Dragging progressively
+enhances the team cards, while **Reorder team** remains a complete fallback if
+the notebook frontend blocks output JavaScript.
 
 To continue from a saved Kaggle notebook version, attach that version as an
 input and set `KAGGLE_PRIOR_RUN_DIR` or `KAGGLE_PRIOR_HUMAN_DIR` to the relevant

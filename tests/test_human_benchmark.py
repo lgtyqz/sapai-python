@@ -428,25 +428,53 @@ class HumanArenaSessionTest(unittest.TestCase):
             refreshed = callbacks[callback_name]("refresh", {})
             self.assertEqual(refreshed.data["stage"], "shop")
 
-    def test_standard_jupyter_widget_adapter_uses_synced_commands(self):
+    def test_standard_jupyter_widget_adapter_uses_only_core_widget_models(self):
         displayed = []
 
-        class FakeAnyWidget:
+        class FakeWidget:
+            def __init__(self, children=(), **values):
+                self.children = tuple(children)
+                self.classes = []
+                self._click_callbacks = []
+                self._observers = []
+                for key, value in values.items():
+                    setattr(self, key, value)
+
+            def add_class(self, name):
+                self.classes.append(name)
+
+            def on_click(self, callback):
+                self._click_callbacks.append(callback)
+
+            def observe(self, callback, names=None):
+                self._observers.append((callback, names))
+
+            def click(self):
+                for callback in self._click_callbacks:
+                    callback(self)
+
+        class FakeLayout:
             def __init__(self, **values):
                 for key, value in values.items():
                     setattr(self, key, value)
 
-        class FakeTrait:
-            def tag(self, **_metadata):
-                return self
+        class FakeJavascript:
+            def __init__(self, data):
+                self.data = data
 
-        fake_anywidget = types.ModuleType("anywidget")
-        fake_anywidget.AnyWidget = FakeAnyWidget
-        fake_traitlets = types.ModuleType("traitlets")
-        fake_traitlets.Dict = FakeTrait
-        fake_traitlets.observe = lambda *_names: lambda method: method
+        fake_widgets = types.ModuleType("ipywidgets")
+        fake_widgets.Layout = FakeLayout
+        fake_widgets.Button = FakeWidget
+        fake_widgets.HTML = FakeWidget
+        fake_widgets.VBox = FakeWidget
+        fake_widgets.HBox = FakeWidget
+        fake_widgets.Box = FakeWidget
+        fake_widgets.IntSlider = FakeWidget
+        fake_widgets.Play = FakeWidget
+        fake_widgets.jslink = lambda *_values: object()
         fake_ipython = types.ModuleType("IPython")
         fake_display = types.ModuleType("IPython.display")
+        fake_display.Javascript = FakeJavascript
         fake_display.display = displayed.append
 
         with tempfile.TemporaryDirectory() as directory:
@@ -454,24 +482,30 @@ class HumanArenaSessionTest(unittest.TestCase):
             with patch.dict(
                 sys.modules,
                 {
-                    "anywidget": fake_anywidget,
-                    "traitlets": fake_traitlets,
+                    "ipywidgets": fake_widgets,
                     "IPython": fake_ipython,
                     "IPython.display": fake_display,
                 },
             ):
                 widget = display_human_arena_widget(session, ASSETS_PATH)
-            widget._handle_request(
-                {"new": {"id": "request-1", "command": "refresh", "parameters": {}}}
-            )
 
-        self.assertEqual(displayed, [widget])
-        self.assertEqual(widget.response, {"id": "request-1"})
-        self.assertEqual(widget.view["stage"], "shop")
-        self.assertIn("function mountHumanArena", widget._esm)
-        self.assertIn("export default", widget._esm)
-        self.assertIn(".human-toolbar", widget._css)
-        self.assertIn("@scope (.sapai-human-output)", widget._css)
+            def descendants(value):
+                yield value
+                for child in getattr(value, "children", ()):
+                    yield from descendants(child)
+
+            roll = next(
+                item
+                for item in descendants(widget)
+                if getattr(item, "description", "") == "↻ Roll (1 gold)"
+            )
+            roll.click()
+
+        self.assertIs(displayed[0], widget)
+        self.assertIsInstance(displayed[1], FakeJavascript)
+        self.assertIn("MutationObserver", displayed[1].data)
+        self.assertIn("sapai-human-core-widget", widget.classes)
+        self.assertEqual(session.revision, 1)
 
     def test_shared_population_loader_applies_the_model_pack_filter(self):
         ant = self.catalog.pet_by_name("Ant").create()
@@ -508,6 +542,7 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("KAGGLE_PRIOR_RUN_DIR", source)
         self.assertIn("UserSecretsClient().get_secret('DATABASE_URL')", source)
         self.assertIn("display_human_arena_widget", source)
+        self.assertNotIn("anywidget", source.lower())
         self.assertNotIn("google.colab", source)
         self.assertNotIn("/content/", source)
         for cell in notebook["cells"]:
