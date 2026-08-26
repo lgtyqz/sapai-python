@@ -419,71 +419,80 @@ class BattleSimulator:
         *,
         trigger_pet: Pet | None = None,
         position: int | None = None,
-        level_override: int | None = None,
-        allow_tiger: bool = True,
-        usage_pet: Pet | None = None,
     ) -> list[Pet]:
         if pet not in self.teams[side] and trigger != "faint":
             return []
         ability_name = str(pet.metadata.get("copied_ability_name", pet.name))
-        level = level_override or pet.level
         pending: list[Pet] = []
+        activated: list[tuple[int, Mapping[str, Any]]] = []
         for ordinal, rule in enumerate(self.rules.pet_rules(ability_name, "battle", trigger)):
-            if level_override is not None and rule.get("ignore_repeat"):
-                continue
             self._tick()
             key = f"{ability_name}:{trigger}:{ordinal}"
-            counter_owner = usage_pet or pet
-            if counter_owner is not pet:
-                key += f":tiger:{self._visual_id(counter_owner)}"
             if not self._rule_ready(
                 side,
                 pet,
-                counter_owner,
                 key,
                 rule,
                 trigger_pet,
                 position,
-                level,
+                pet.level,
+                repeated=False,
             ):
                 continue
-            variables = self._variables(pet, level, trigger_pet)
+            activated.append((ordinal, rule))
+            variables = self._variables(pet, pet.level, trigger_pet)
             for effect in rule["effects"]:
                 pending.extend(
                     self._apply_effect(side, pet, effect, variables, trigger_pet, position)
                 )
 
-        if allow_tiger:
-            index = self._index(side, pet)
-            if index is not None and index + 1 < len(self.teams[side]):
-                tiger = self.teams[side][index + 1]
-                if tiger.alive and self.rules.pet_definition(tiger.name).get(
-                    "repeat_friend_ahead_battle"
-                ):
-                    pending.extend(
-                        self._execute(
-                            side,
-                            pet,
-                            trigger,
-                            trigger_pet=trigger_pet,
-                            position=position,
-                            level_override=tiger.level,
-                            allow_tiger=False,
-                            usage_pet=tiger,
+        index = self._index(side, pet)
+        if activated and index is not None and index + 1 < len(self.teams[side]):
+            tiger = self.teams[side][index + 1]
+            if tiger.alive and self.rules.pet_definition(tiger.name).get(
+                "repeat_friend_ahead_battle"
+            ):
+                for ordinal, rule in activated:
+                    if rule.get("ignore_repeat"):
+                        continue
+                    self._tick()
+                    key = f"{ability_name}:{trigger}:{ordinal}"
+                    if not self._rule_ready(
+                        side,
+                        pet,
+                        key,
+                        rule,
+                        trigger_pet,
+                        position,
+                        tiger.level,
+                        repeated=True,
+                    ):
+                        continue
+                    variables = self._variables(pet, tiger.level, trigger_pet)
+                    for effect in rule["effects"]:
+                        pending.extend(
+                            self._apply_effect(
+                                side,
+                                pet,
+                                effect,
+                                variables,
+                                trigger_pet,
+                                position,
+                            )
                         )
-                    )
         return pending
 
     def _rule_ready(
         self,
         side: int,
         pet: Pet,
-        usage_pet: Pet,
         key: str,
         rule: Mapping[str, Any],
         trigger_pet: Pet | None,
         position: int | None,
         level: int,
+        *,
+        repeated: bool,
     ) -> bool:
         for condition in rule.get("conditions", []):
             kind = condition["kind"]
@@ -510,20 +519,20 @@ class BattleSimulator:
             }:
                 raise BattleSimulationError(f"unknown battle condition: {kind}")
 
-        battle = usage_pet.metadata.setdefault("battle", {})
+        battle = pet.metadata.setdefault("battle", {})
         counters = battle.setdefault("counters", {})
-        if "counter_every" in rule:
+        if "counter_every" in rule and not repeated:
             counters[key] = int(counters.get(key, 0)) + 1
             if counters[key] % int(rule["counter_every"]) != 0:
                 return False
         uses = battle.setdefault("uses", {})
         maximum = rule.get("max_uses")
         if maximum is not None:
-            limit = int(evaluate(maximum, self._variables(pet, level, trigger_pet)))
+            limit = int(evaluate(maximum, self._variables(pet, pet.level, trigger_pet)))
             if int(uses.get(key, 0)) >= limit:
                 return False
             uses[key] = int(uses.get(key, 0)) + 1
-        if rule.get("once_per_team"):
+        if rule.get("once_per_team") and not repeated:
             if self.team_uses[side].get(key, 0):
                 return False
             self.team_uses[side][key] = 1

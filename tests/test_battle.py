@@ -137,6 +137,57 @@ class BattleSimulatorTest(unittest.TestCase):
         self.assertEqual(max(pet.effective_attack for pet in zombies), 10)
         self.assertEqual(max(pet.effective_health for pet in zombies), 4)
 
+    def test_tiger_repeat_consumes_the_ahead_flys_trigger_budget(self):
+        cricket = self.catalog.pet_by_name("Cricket").create()
+        cricket.attack = 1
+        cricket.health = 1
+        fly = self.catalog.pet_by_name("Fly").create()
+        fly.health = 100
+        tiger = self.catalog.pet_by_name("Tiger").create()
+        tiger.health = 100
+        enemy = Pet(20, "Tank", 1, 20, 500)
+
+        result = self.simulator.simulate(
+            Team.from_pets([cricket, fly, tiger]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        first_round = next(frame for frame in result.frames if frame.label == "Round 1 resolved")
+        self.assertEqual(
+            [pet.name for pet in first_round.player.living()].count("Zombie Fly"),
+            2,
+        )
+        fly_state = next(pet for pet in first_round.player.living() if pet.name == "Fly")
+        tiger_state = next(pet for pet in first_round.player.living() if pet.name == "Tiger")
+        self.assertEqual(fly_state.metadata["battle"]["uses"]["Fly:friend_fainted:0"], 2)
+        self.assertEqual(tiger_state.metadata["battle"]["uses"], {})
+
+    def test_tiger_does_not_advance_an_unactivated_every_n_counter(self):
+        front = Pet(20, "Front", 1, 1, 100)
+        wolverine = self.catalog.pet_by_name("Wolverine").create()
+        wolverine.health = 100
+        tiger = self.catalog.pet_by_name("Tiger").create()
+        tiger.health = 100
+        enemy = Pet(21, "Tank", 1, 1, 500)
+
+        result = self.simulator.simulate(
+            Team.from_pets([front, wolverine, tiger]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        first_impact = next(frame for frame in result.frames if frame.event == "impact")
+        wolverine_state = next(
+            pet for pet in first_impact.player.living() if pet.name == "Wolverine"
+        )
+        tiger_state = next(pet for pet in first_impact.player.living() if pet.name == "Tiger")
+        self.assertEqual(
+            wolverine_state.metadata["battle"]["counters"]["Wolverine:friend_hurt:0"],
+            1,
+        )
+        self.assertEqual(tiger_state.metadata["battle"]["counters"], {})
+
     def test_level_three_elephant_triggers_level_two_blowfish_three_times(self):
         elephant = self.catalog.pet_by_name("Elephant").create()
         elephant.experience = 5
