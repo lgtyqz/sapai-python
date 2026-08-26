@@ -160,6 +160,92 @@ class BattleSimulatorTest(unittest.TestCase):
         first_attack_log = result.log[:next_attack]
         self.assertEqual(sum("Tank takes 6" in line for line in first_attack_log), 3)
 
+    def test_fly_does_not_trigger_when_zombie_fly_faints(self):
+        zombie_fly = self.catalog.pet_by_name("Zombie Fly").create()
+        zombie_fly.attack = 1
+        zombie_fly.health = 1
+        fly = self.catalog.pet_by_name("Fly").create()
+        fly.health = 100
+        enemy = Pet(20, "Tank", 1, 10, 100)
+
+        result = self.simulator.simulate(
+            Team.from_pets([zombie_fly, fly]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        first_round = next(frame for frame in result.frames if frame.label == "Round 1 resolved")
+        self.assertEqual([pet.name for pet in first_round.player.living()], ["Fly"])
+        fly_state = first_round.player.slots[0]
+        self.assertEqual(fly_state.metadata["battle"]["uses"], {})
+
+    def test_mushroom_revive_preserves_ability_trigger_usage(self):
+        hippo = self.catalog.pet_by_name("Hippo").create()
+        hippo.attack = 10
+        hippo.health = 20
+        hippo.perk = "Mushroom"
+        hippo.triggers_consumed = 2
+        opponents = [
+            Pet(20, "Weakling", 1, 1, 1),
+            Pet(21, "Tank", 1, 100, 500),
+        ]
+
+        result = self.simulator.simulate(
+            Team.from_pets([hippo]),
+            Team.from_pets(opponents),
+            seed=1,
+        )
+
+        revived = next(
+            pet
+            for frame in result.frames
+            for pet in frame.player.living()
+            if pet.name == "Hippo" and pet.attack == 1 and pet.health == 1 and pet.perk is None
+        )
+        self.assertEqual(revived.triggers_consumed, 2)
+        self.assertEqual(revived.metadata["battle"]["uses"]["Hippo:knockout:0"], 1)
+
+    def test_mushroomed_fly_does_not_trigger_on_its_own_faint(self):
+        fly = self.catalog.pet_by_name("Fly").create()
+        fly.health = 1
+        fly.perk = "Mushroom"
+        enemy = Pet(20, "Tank", 1, 20, 100)
+
+        result = self.simulator.simulate(
+            Team.from_pets([fly]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        first_round = next(frame for frame in result.frames if frame.label == "Round 1 resolved")
+        self.assertEqual([pet.name for pet in first_round.player.living()], ["Fly"])
+        revived = first_round.player.slots[0]
+        self.assertEqual((revived.attack, revived.health, revived.perk), (1, 1, None))
+        self.assertEqual(revived.metadata["battle"]["uses"], {})
+
+    def test_another_fly_can_trigger_on_a_mushroomed_fly_faint(self):
+        mushroomed = self.catalog.pet_by_name("Fly").create()
+        mushroomed.health = 1
+        mushroomed.perk = "Mushroom"
+        observer = self.catalog.pet_by_name("Fly").create()
+        observer.health = 100
+        enemy = Pet(20, "Tank", 1, 20, 100)
+
+        result = self.simulator.simulate(
+            Team.from_pets([mushroomed, observer]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        first_round = next(frame for frame in result.frames if frame.label == "Round 1 resolved")
+        self.assertEqual(
+            [pet.name for pet in first_round.player.living()],
+            ["Zombie Fly", "Fly", "Fly"],
+        )
+        revived, other = first_round.player.slots[1:3]
+        self.assertEqual(revived.metadata["battle"]["uses"], {})
+        self.assertEqual(other.metadata["battle"]["uses"]["Fly:friend_fainted:0"], 1)
+
     def test_turtle_tokens_and_no_ability_catalog_pets_are_supported(self):
         token_names = (
             "Bee",

@@ -359,6 +359,8 @@ class BattleSimulator:
             summons.extend(self._perk_faint(pet))
             self._insert_summons(side, position, summons)
             for friend in list(self.teams[side]):
+                if self._visual_id(friend) == self._visual_id(pet):
+                    continue
                 self._execute(side, friend, "friend_fainted", trigger_pet=pet, position=position)
             self._remove_processed_dead()
 
@@ -384,6 +386,7 @@ class BattleSimulator:
                 revived.health = int(effect["health"])
                 revived.temporary_attack = revived.temporary_health = 0
                 revived.perk = None
+                revived.metadata["preserve_battle_triggers_on_summon"] = True
                 results.append(revived)
         return results
 
@@ -392,9 +395,13 @@ class BattleSimulator:
         accepted = summons[:room]
         for pet in accepted:
             self._assign_visual_id(pet)
+            preserve_triggers = bool(
+                pet.metadata.pop("preserve_battle_triggers_on_summon", False)
+            )
+            previous_battle = pet.metadata.get("battle", {}) if preserve_triggers else {}
             pet.metadata["battle"] = {
-                "uses": {},
-                "counters": {},
+                "uses": dict(previous_battle.get("uses", {})),
+                "counters": dict(previous_battle.get("counters", {})),
                 "faint_processed": False,
             }
         self.teams[side][index:index] = accepted
