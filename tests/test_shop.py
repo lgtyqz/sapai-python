@@ -3,7 +3,7 @@ import unittest
 
 from sapai.data.serialization import run_state_from_dict, run_state_to_dict
 from sapai.sim.actions import Action, ActionKind
-from sapai.sim.models import Food, Pet, Shop, ShopPet, Team
+from sapai.sim.models import BattleOutcome, Food, Pet, RunState, Shop, ShopPet, Team
 from sapai.sim.shop import ShopEnvironment
 from sapai.sim.shop_abilities import ShopAbilityEngine
 from tests.helpers import catalog
@@ -127,6 +127,138 @@ class ShopEnvironmentTest(unittest.TestCase):
         self.assertEqual(updated.team.slots[0].level, 2)
         self.assertEqual(len(rewards), 2)
         self.assertEqual({offer.pet.tier for offer in rewards}, {2})
+        self.assertEqual(
+            [offer.pet.tier for offer in updated.shop.pets],
+            sorted((offer.pet.tier for offer in updated.shop.pets), reverse=True),
+        )
+
+    def test_shop_pets_are_tier_sorted_and_sloth_is_the_leftmost_rare_roll(self):
+        class ControlledSlothRandom(random.Random):
+            def __init__(self, *, roll_sloth):
+                super().__init__(4)
+                self.roll_sloth = roll_sloth
+
+            def randrange(self, start, stop=None, step=1):
+                if start == ShopEnvironment.SLOTH_ROLL_DENOMINATOR and stop is None:
+                    return 0 if self.roll_sloth else 1
+                return super().randrange(start, stop, step)
+
+        state = RunState(pack="Turtle", turn=11)
+        state.shop = Shop(
+            [
+                ShopPet(self.catalog.pet_by_name("Ant").create(), frozen=True),
+                ShopPet(self.catalog.pet_by_name("Cat").create(), frozen=True),
+                ShopPet(self.catalog.pet_by_name("Deer").create(), frozen=True),
+            ],
+            [],
+        )
+        ordinary = self.environment.roll_shop(
+            state,
+            ControlledSlothRandom(roll_sloth=False),
+        )
+        self.assertEqual(
+            [offer.pet.tier for offer in ordinary.pets],
+            sorted((offer.pet.tier for offer in ordinary.pets), reverse=True),
+        )
+
+        state.shop = Shop()
+        rare = self.environment.roll_shop(
+            state,
+            ControlledSlothRandom(roll_sloth=True),
+        )
+        self.assertEqual(rare.pets[0].pet.name, "Sloth")
+        self.assertEqual(sum(offer.pet.name == "Sloth" for offer in rare.pets), 1)
+
+    def test_combining_keeps_temporary_stats_separate_from_merged_base_stats(self):
+        state = self.environment.reset(seed=2)
+        source = self.catalog.pet_by_name("Ant").create(instance_id=1)
+        target = self.catalog.pet_by_name("Ant").create(instance_id=2)
+        source.attack, source.health = 5, 4
+        source.temporary_health = 7
+        target.attack, target.health = 2, 6
+        target.temporary_attack = 3
+        state.team = Team.from_pets([source, target])
+        state.shop = Shop()
+
+        merged = self.environment.step(
+            state,
+            Action(ActionKind.MERGE_BOARD_PET, 0, 1),
+            random.Random(1),
+        ).state.team.slots[1]
+
+        self.assertEqual((merged.attack, merged.health), (6, 7))
+        self.assertEqual((merged.temporary_attack, merged.temporary_health), (3, 7))
+        self.assertEqual((merged.effective_attack, merged.effective_health), (9, 14))
+
+    def test_cake_and_bread_apply_their_end_turn_perks(self):
+        state = self.environment.reset(seed=2)
+        ant = self.catalog.pet_by_name("Ant").create(instance_id=1)
+        fish = self.catalog.pet_by_name("Fish").create(instance_id=2)
+        original_fish_health = fish.health
+        state.team = Team.from_pets([ant, fish])
+        state.shop = Shop(
+            [],
+            [
+                self.catalog.food_by_name("Cake").create(),
+                self.catalog.food_by_name("Bread").create(),
+            ],
+        )
+        state.gold = 6
+
+        state = self.environment.step(
+            state,
+            Action(ActionKind.BUY_FOOD, 0, 0),
+            random.Random(1),
+        ).state
+        state = self.environment.step(
+            state,
+            Action(ActionKind.BUY_FOOD, 0, 1),
+            random.Random(1),
+        ).state
+        state = self.environment.step(
+            state,
+            Action(ActionKind.END_TURN),
+            random.Random(1),
+        ).state
+
+        self.assertEqual(state.team.slots[0].metadata["sell_value_bonus"], 1)
+        self.assertEqual(state.team.slots[1].health, original_fish_health)
+        self.assertEqual(state.team.slots[1].temporary_health, 7)
+
+        next_turn = self.environment.apply_outcome(
+            state,
+            BattleOutcome.DRAW,
+            random.Random(2),
+        ).state
+        self.assertEqual(next_turn.team.slots[1].temporary_health, 0)
+        next_turn.gold = 0
+        sold = self.environment.step(
+            next_turn,
+            Action(ActionKind.SELL_PET, 0),
+            random.Random(1),
+        ).state
+        self.assertEqual(sold.gold, 2)
+
+    def test_parrot_copies_at_end_turn_and_resets_at_start_turn(self):
+        state = self.environment.reset(seed=2)
+        mosquito = self.catalog.pet_by_name("Mosquito").create(instance_id=1)
+        parrot = self.catalog.pet_by_name("Parrot").create(instance_id=2)
+        state.team = Team.from_pets([mosquito, parrot])
+        state.shop = Shop()
+
+        ended = self.environment.step(
+            state,
+            Action(ActionKind.END_TURN),
+            random.Random(1),
+        ).state
+        self.assertEqual(ended.team.slots[1].metadata["copied_ability_name"], "Mosquito")
+
+        next_turn = self.environment.apply_outcome(
+            ended,
+            BattleOutcome.DRAW,
+            random.Random(2),
+        ).state
+        self.assertNotIn("copied_ability_name", next_turn.team.slots[1].metadata)
 
     def test_cat_multiplies_one_food_event_not_each_target(self):
         state = self.environment.reset(seed=2)
@@ -145,6 +277,23 @@ class ShopEnvironmentTest(unittest.TestCase):
         )
         self.assertEqual(total_gain, 16)  # two targets, +4/+4 each at level-1 Cat
         self.assertEqual(cat.metadata.get("turn_uses"), None)  # input remains immutable
+
+    def test_multiple_cats_stack_food_bonuses_additively(self):
+        state = self.environment.reset(seed=2)
+        cats = [self.catalog.pet_by_name("Cat").create(instance_id=index) for index in (1, 2)]
+        ant = self.catalog.pet_by_name("Ant").create(instance_id=3)
+        state.team = Team.from_pets([*cats, ant])
+        state.shop = Shop([], [self.catalog.food_by_name("Pear").create()])
+        state.gold = 3
+
+        updated = self.environment.step(
+            state,
+            Action(ActionKind.BUY_FOOD, 0, 2),
+            random.Random(1),
+        ).state
+
+        fed = updated.team.slots[2]
+        self.assertEqual((fed.attack - ant.attack, fed.health - ant.health), (6, 6))
 
     def test_turkey_permanently_buffs_a_bought_pet(self):
         state = self.environment.reset(seed=2)

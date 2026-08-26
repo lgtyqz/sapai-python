@@ -123,7 +123,25 @@ class ShopAbilityEngine:
         self._ordered_dispatch(state, "start_turn", rng)
 
     def end_turn(self, state: RunState, rng: random.Random) -> None:
-        self._ordered_dispatch(state, "end_turn", rng, team_uses={})
+        team_uses: dict[str, int] = {}
+        for pet in self._ordered_pets(state, rng):
+            if pet not in state.team.slots:
+                continue
+            owner_index = state.team.slots.index(pet)
+            self._dispatch(
+                state,
+                owner_index,
+                "end_turn",
+                rng,
+                team_uses=team_uses,
+            )
+            self._dispatch_perk(
+                state,
+                owner_index,
+                "end_turn",
+                rng,
+                team_uses=team_uses,
+            )
 
     def apply_food(
         self,
@@ -144,7 +162,10 @@ class ShopAbilityEngine:
         if definition.get("stat_food") or food.name in generated:
             for owner_index, _ in self._pets(state):
                 result = self._dispatch(state, owner_index, "food_multiplier", rng)
-                multiplier = max(multiplier, result.value)
+                # Cat modifiers add their extra copies instead of multiplying
+                # one another or collapsing to the strongest Cat. A level-one
+                # Cat contributes one extra copy, so two make Pear resolve 3x.
+                multiplier += max(0, result.value - 1)
 
         if food.name in generated:
             attack, health = generated[food.name]
@@ -202,6 +223,54 @@ class ShopAbilityEngine:
                     team_uses=shared,
                 )
             )
+        return result
+
+    def _dispatch_perk(
+        self,
+        state: RunState,
+        owner_index: int,
+        trigger: str,
+        rng: random.Random,
+        *,
+        team_uses: dict[str, int] | None = None,
+    ) -> ShopDispatchResult:
+        owner = state.team.slots[owner_index]
+        result = ShopDispatchResult()
+        if owner is None:
+            return result
+        variables = {
+            "level": owner.level,
+            "old_level": owner.level,
+            "new_level_minus_one": max(0, owner.level - 1),
+            "attack": owner.effective_attack,
+            "health": owner.effective_health,
+            "trigger_tier": 0,
+        }
+        for ordinal, rule in enumerate(self.rules.perk_rules(owner.perk, "shop", trigger)):
+            key = f"perk:{owner.perk}:{trigger}:{ordinal}"
+            if not self._rule_ready(
+                state,
+                owner_index,
+                rule,
+                key,
+                variables,
+                team_uses,
+                None,
+                None,
+            ):
+                continue
+            for effect in rule["effects"]:
+                result.extend(
+                    self._apply_effect(
+                        state,
+                        owner_index,
+                        effect,
+                        variables,
+                        rng,
+                        trigger_pet=None,
+                        trigger_position=None,
+                    )
+                )
         return result
 
     def _dispatch_observers(
@@ -444,6 +513,12 @@ class ShopAbilityEngine:
                 )
         elif op == "food_multiplier":
             result.value = int(evaluate(effect["amount"], variables))
+        elif op == "increase_sell_value":
+            if owner is not None:
+                bonus = int(evaluate(effect["amount"], variables))
+                owner.metadata["sell_value_bonus"] = (
+                    int(owner.metadata.get("sell_value_bonus", 0)) + bonus
+                )
         elif op == "buff_current_and_future_shop":
             attack = int(evaluate(effect.get("attack", 0), variables)) * food_multiplier
             health = int(evaluate(effect.get("health", 0), variables)) * food_multiplier
@@ -496,12 +571,10 @@ class ShopAbilityEngine:
         amount = max(minimum, amount - reduction)
         if perk.get("consume_on_hurt"):
             target.perk = None
-        absorbed = min(max(0, target.temporary_health), amount)
+        dealt = amount
+        absorbed = min(max(0, target.temporary_health), dealt)
         target.temporary_health -= absorbed
-        amount -= absorbed
-        target.health -= amount
-        if amount <= 0:
-            return
+        target.health -= dealt - absorbed
         if source is not None and self.rules.perk_definition(source.perk).get("lethal_on_damage"):
             target.health = min(target.health, 0)
         self._dispatch(state, target_index, "hurt", rng, trigger_pet=source)

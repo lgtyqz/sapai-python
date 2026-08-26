@@ -9,7 +9,7 @@ import random
 import statistics
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -29,6 +29,10 @@ from sapai.training.population import OpponentPopulation
 
 HUMAN_BENCHMARK_FORMAT = "sapai-human-arena-v1"
 SessionStage = Literal["shop", "battle_review", "complete"]
+
+
+class HumanBenchmarkSettingsMismatchError(ValueError):
+    """Raised when a directory belongs to a different benchmark configuration."""
 
 
 def sha256_file(path: str | Path) -> str:
@@ -162,6 +166,8 @@ class HumanArenaSession:
         battle: BattleSimulator,
         population: OpponentPopulation,
         config: HumanBenchmarkConfig,
+        *,
+        version_on_mismatch: bool = False,
     ) -> HumanArenaSession:
         if len(population.boards) != config.board_count:
             raise ValueError(
@@ -174,7 +180,23 @@ class HumanArenaSession:
         session.population = population
         session.config = config
         session._lock = threading.RLock()
-        session._validate_or_create_manifest()
+        try:
+            session._validate_or_create_manifest()
+        except HumanBenchmarkSettingsMismatchError:
+            if not version_on_mismatch:
+                raise
+            versioned_config = replace(
+                config,
+                output_dir=config.directory.with_name(
+                    f"{config.directory.name}-{session._manifest_fingerprint()}"
+                ),
+            )
+            return cls.create_or_resume(
+                environment,
+                battle,
+                population,
+                versioned_config,
+            )
         current = config.directory / "current.json"
         if current.exists():
             session._data = _SessionData.from_dict(json.loads(current.read_text(encoding="utf-8")))
@@ -463,6 +485,14 @@ class HumanArenaSession:
             },
         }
 
+    def _manifest_fingerprint(self) -> str:
+        encoded = json.dumps(
+            self._manifest_identity(),
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()[:12]
+
     def _validate_or_create_manifest(self) -> None:
         path = self.config.directory / "manifest.json"
         identity = self._manifest_identity()
@@ -470,7 +500,7 @@ class HumanArenaSession:
             existing = json.loads(path.read_text(encoding="utf-8"))
             existing_identity = {key: existing.get(key) for key in identity}
             if existing_identity != identity:
-                raise ValueError(
+                raise HumanBenchmarkSettingsMismatchError(
                     f"human benchmark settings changed in {self.config.directory}; "
                     "use a new benchmark directory"
                 )

@@ -291,6 +291,71 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertEqual(persisted["stage"], "battle_review")
         self.assertTrue(visual["battle"]["slides"])
 
+    def test_whale_deer_bus_persists_in_human_battle_review_and_visualizer(self):
+        state = ShopEnvironment(self.catalog).reset(seed=4)
+        deer = self.catalog.pet_by_name("Deer").create(instance_id=1)
+        whale = self.catalog.pet_by_name("Whale").create(instance_id=2)
+        whale.health = 100
+        state.team = Team.from_pets([deer, whale])
+        population = OpponentPopulation(
+            [
+                BoardSnapshot(
+                    "tank-opponent",
+                    "opponent",
+                    state.turn,
+                    "Turtle",
+                    Team.from_pets([self.catalog.pet_by_name("Sloth").create()]),
+                    version=state.version,
+                )
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = HumanBenchmarkConfig(
+                directory,
+                "human",
+                "Turtle",
+                9,
+                "whale-deer-board",
+                1,
+                "test-commit",
+            )
+            environment = FixedEnvironment(self.catalog, state)
+            session = HumanArenaSession.create_or_resume(
+                environment,
+                BattleSimulator(self.catalog),
+                population,
+                config,
+            )
+            snapshot = session.snapshot()
+            end = self._action(snapshot, "END_TURN")
+            session.apply_action(
+                end["id"],
+                expected_revision=snapshot["revision"],
+                elapsed_ms=10,
+            )
+            resumed = HumanArenaSession.create_or_resume(
+                environment,
+                BattleSimulator(self.catalog),
+                population,
+                config,
+            )
+            review = resumed.snapshot()["battle"]["result"]
+            visual = human_arena_payload(resumed, ASSETS_PATH)
+
+        ability_frame = next(frame for frame in review["frames"] if frame["event"] == "ability")
+        self.assertEqual(
+            [pet["name"] for pet in ability_frame["player"] if pet is not None],
+            ["Bus", "Whale"],
+        )
+        ability_slide = next(
+            slide for slide in visual["battle"]["slides"] if slide["event"] == "ability"
+        )
+        self.assertEqual(
+            [pet["name"] for pet in ability_slide["player"] if pet is not None],
+            ["Bus", "Whale"],
+        )
+
     def test_terminal_episode_writes_audit_summary_and_starts_the_next_game(self):
         state = self._state_with_all_action_types()
         state.team = Team()
@@ -322,6 +387,31 @@ class HumanArenaSessionTest(unittest.TestCase):
             self.assertEqual(next_game["episode_index"], 1)
             self.assertTrue(next_game["summary"]["episode_in_progress"])
 
+    def test_completed_benchmark_directory_can_be_opened_repeatedly(self):
+        state = self._state_with_all_action_types()
+        state.team = Team()
+        state.lives = 1
+        with tempfile.TemporaryDirectory() as directory:
+            session = self._session(directory, state=state)
+            snapshot = session.snapshot()
+            end = self._action(snapshot, "END_TURN")
+            session.apply_action(
+                end["id"],
+                expected_revision=snapshot["revision"],
+                elapsed_ms=1,
+            )
+            session.continue_battle(expected_revision=session.revision)
+            episode_path = Path(directory) / "episodes" / "000000.json"
+            completed_episode = episode_path.read_bytes()
+
+            first_resume = self._session(directory, state=state)
+            second_resume = self._session(directory, state=state)
+
+            self.assertEqual(first_resume.stage, "complete")
+            self.assertEqual(second_resume.stage, "complete")
+            self.assertEqual(second_resume.snapshot()["summary"]["games_completed"], 1)
+            self.assertEqual(episode_path.read_bytes(), completed_episode)
+
     def test_resume_rejects_a_changed_manifest_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             self._session(directory)
@@ -342,6 +432,47 @@ class HumanArenaSessionTest(unittest.TestCase):
                     self.population,
                     changed,
                 )
+
+    def test_notebook_mode_versions_an_incompatible_existing_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / "benchmark"
+            original = self._session(directory)
+            original_manifest = (directory / "manifest.json").read_bytes()
+            original_current = (directory / "current.json").read_bytes()
+            changed = HumanBenchmarkConfig(
+                directory,
+                "human",
+                "Turtle",
+                11,
+                "different-boards",
+                len(self.population.boards),
+                "new-commit",
+            )
+
+            versioned = HumanArenaSession.create_or_resume(
+                original.environment,
+                BattleSimulator(self.catalog),
+                self.population,
+                changed,
+                version_on_mismatch=True,
+            )
+            resumed_versioned = HumanArenaSession.create_or_resume(
+                original.environment,
+                BattleSimulator(self.catalog),
+                self.population,
+                changed,
+                version_on_mismatch=True,
+            )
+
+            self.assertNotEqual(versioned.config.directory, directory)
+            self.assertEqual(versioned.config.directory, resumed_versioned.config.directory)
+            self.assertTrue(
+                versioned.config.directory.name.startswith(directory.name + "-")
+            )
+            self.assertEqual(
+                (directory / "manifest.json").read_bytes(), original_manifest
+            )
+            self.assertEqual((directory / "current.json").read_bytes(), original_current)
 
     def test_reload_does_not_change_seeded_episode_outcome(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -531,6 +662,7 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("if RUN_HUMAN_BENCHMARK:", launcher)
         self.assertIn("load_opponent_population(BOARDS_FOR_RUN", launcher)
         self.assertIn("display_human_arena", launcher)
+        self.assertIn("version_on_mismatch=True", launcher)
         ast.parse(launcher)
 
     def test_kaggle_notebook_is_native_guarded_and_parseable(self):
@@ -542,6 +674,7 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("KAGGLE_PRIOR_RUN_DIR", source)
         self.assertIn("UserSecretsClient().get_secret('DATABASE_URL')", source)
         self.assertIn("display_human_arena_widget", source)
+        self.assertIn("version_on_mismatch=True", source)
         self.assertNotIn("anywidget", source.lower())
         self.assertNotIn("google.colab", source)
         self.assertNotIn("/content/", source)

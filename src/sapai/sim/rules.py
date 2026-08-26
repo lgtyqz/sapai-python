@@ -35,6 +35,7 @@ SHOP_EFFECTS = frozenset(
         "food_multiplier",
         "gain_gold",
         "give_perk",
+        "increase_sell_value",
         "replace_food",
         "stock_food",
         "stock_scaled_food",
@@ -128,6 +129,18 @@ class RuleBook:
             unknown = {effect["op"] for effect in definition.get("on_faint", [])} - PERK_EFFECTS
             if unknown:
                 raise ValueError(f"unsupported perk effects for {perk!r}: {sorted(unknown)}")
+            for rule in definition.get("rules", []):
+                if rule.get("phase") != "shop":
+                    raise ValueError(f"invalid perk-rule phase for {perk!r}: {rule!r}")
+                if not rule.get("trigger") or not isinstance(rule.get("effects"), list):
+                    raise ValueError(f"invalid perk rule for {perk!r}: {rule!r}")
+                if any("op" not in effect for effect in rule["effects"]):
+                    raise ValueError(f"perk-rule effect without op for {perk!r}")
+                unknown = {effect["op"] for effect in rule["effects"]} - SHOP_EFFECTS
+                if unknown:
+                    raise ValueError(
+                        f"unsupported perk-rule effects for {perk!r}: {sorted(unknown)}"
+                    )
 
     @property
     def source(self) -> Mapping[str, Any]:
@@ -185,3 +198,11 @@ class RuleBook:
         if name is None:
             return {}
         return self.data["perks"].get(name, {})
+
+    def perk_rules(self, name: str | None, phase: str, trigger: str) -> list[Mapping[str, Any]]:
+        definition = self.perk_definition(name)
+        return [
+            rule
+            for rule in definition.get("rules", [])
+            if rule["trigger"] == trigger and rule["phase"] == phase
+        ]

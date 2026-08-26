@@ -121,7 +121,7 @@
     "Coconut": {"damage_reduction": 9999, "consume_on_hurt": true},
     "Peanut": {"lethal_on_damage": true},
     "Chili": {"splash_damage": 5},
-    "Cake": {"attack_bonus": 3, "consume_on_attack": true},
-    "Bread": {"attack_bonus": 3}
+    "Cake": {"rules": [{"phase": "shop", "trigger": "end_turn", "effects": [{"op": "increase_sell_value", "amount": 1}]}]},
+    "Bread": {"rules": [{"phase": "shop", "trigger": "end_turn", "effects": [{"op": "buff", "target": "self", "health": 7, "temporary": true}]}]}
   }
 }

@@ -234,8 +234,10 @@ class BattleSimulator:
             return
         attacker = self.teams[side][0]
         defender = self.teams[enemy_side][0]
-        self._execute(side, attacker, "before_attack")
-        if not attacker.alive:
+        participants = ((side, attacker), (enemy_side, defender))
+        for participant_side, participant in participants:
+            self._execute(participant_side, participant, "before_attack")
+        if not attacker.alive or not defender.alive:
             self._resolve_deaths()
             self._capture(
                 f"Round {round_number} resolved",
@@ -259,11 +261,17 @@ class BattleSimulator:
         self._splash(enemy_side, attacker)
         self._splash(side, defender)
 
-        self._execute(side, attacker, "after_attack")
-        attacker_index = self._index(side, attacker)
-        if attacker_index is not None:
-            for follower in list(self.teams[side][attacker_index + 1 :]):
-                self._execute(side, follower, "friend_ahead_attacked", trigger_pet=attacker)
+        for participant_side, participant in participants:
+            self._execute(participant_side, participant, "after_attack")
+            participant_index = self._index(participant_side, participant)
+            if participant_index is not None:
+                for follower in list(self.teams[participant_side][participant_index + 1 :]):
+                    self._execute(
+                        participant_side,
+                        follower,
+                        "friend_ahead_attacked",
+                        trigger_pet=participant,
+                    )
 
         self._capture(
             "Damage and attack abilities resolve",
@@ -310,11 +318,11 @@ class BattleSimulator:
         if perk.get("consume_on_hurt"):
             target.perk = None
 
-        absorbed = min(max(0, target.temporary_health), amount)
+        dealt = amount
+        absorbed = min(max(0, target.temporary_health), dealt)
         target.temporary_health -= absorbed
-        amount -= absorbed
-        target.health -= amount
-        hurt = amount > 0
+        target.health -= dealt - absorbed
+        hurt = dealt > 0
         if (
             hurt
             and source is not None
@@ -322,7 +330,7 @@ class BattleSimulator:
         ):
             target.health = min(target.health, 0)
         if hurt:
-            self.log.append(f"{target.name} takes {original} ({amount} health) damage")
+            self.log.append(f"{target.name} takes {original} ({dealt} health) damage")
             self._execute(side, target, "hurt", trigger_pet=source)
             for friend in list(self.teams[side]):
                 if friend is not target:
@@ -406,6 +414,7 @@ class BattleSimulator:
         position: int | None = None,
         level_override: int | None = None,
         allow_tiger: bool = True,
+        usage_pet: Pet | None = None,
     ) -> list[Pet]:
         if pet not in self.teams[side] and trigger != "faint":
             return []
@@ -417,7 +426,19 @@ class BattleSimulator:
                 continue
             self._tick()
             key = f"{ability_name}:{trigger}:{ordinal}"
-            if not self._rule_ready(side, pet, key, rule, trigger_pet, position, level):
+            counter_owner = usage_pet or pet
+            if counter_owner is not pet:
+                key += f":tiger:{self._visual_id(counter_owner)}"
+            if not self._rule_ready(
+                side,
+                pet,
+                counter_owner,
+                key,
+                rule,
+                trigger_pet,
+                position,
+                level,
+            ):
                 continue
             variables = self._variables(pet, level, trigger_pet)
             for effect in rule["effects"]:
@@ -425,7 +446,7 @@ class BattleSimulator:
                     self._apply_effect(side, pet, effect, variables, trigger_pet, position)
                 )
 
-        if allow_tiger and trigger not in {"friend_summoned", "friend_fainted"}:
+        if allow_tiger:
             index = self._index(side, pet)
             if index is not None and index + 1 < len(self.teams[side]):
                 tiger = self.teams[side][index + 1]
@@ -441,6 +462,7 @@ class BattleSimulator:
                             position=position,
                             level_override=tiger.level,
                             allow_tiger=False,
+                            usage_pet=tiger,
                         )
                     )
         return pending
@@ -449,6 +471,7 @@ class BattleSimulator:
         self,
         side: int,
         pet: Pet,
+        usage_pet: Pet,
         key: str,
         rule: Mapping[str, Any],
         trigger_pet: Pet | None,
@@ -480,7 +503,7 @@ class BattleSimulator:
             }:
                 raise BattleSimulationError(f"unknown battle condition: {kind}")
 
-        battle = pet.metadata.setdefault("battle", {})
+        battle = usage_pet.metadata.setdefault("battle", {})
         counters = battle.setdefault("counters", {})
         if "counter_every" in rule:
             counters[key] = int(counters.get(key, 0)) + 1
@@ -603,7 +626,20 @@ class BattleSimulator:
                     )
                     released.perk = None
                     swallowed.append(released)
+                    position = self.teams[side].index(target)
+                    faint_summons = self._execute(side, target, "faint")
                     self.teams[side].remove(target)
+                    self._insert_summons(side, position, faint_summons)
+                    self.log.append(
+                        f"P{side + 1} {pet.name} swallows {target.name}; "
+                        f"{target.name} faint ability activates"
+                    )
+                    self._capture(
+                        f"{pet.name} swallows {target.name}",
+                        event="ability",
+                        actor=pet,
+                        target=target,
+                    )
             return []
         if op == "release_swallowed":
             return list(pet.metadata.pop("swallowed", []))

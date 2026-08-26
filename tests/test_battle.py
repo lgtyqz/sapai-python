@@ -38,13 +38,127 @@ class BattleSimulatorTest(unittest.TestCase):
     def test_parrot_copies_nearest_pet_before_battle(self):
         mosquito = self.catalog.pet_by_name("Mosquito").create()
         parrot = self.catalog.pet_by_name("Parrot").create()
-        enemies = [Pet(20, "Tank A", 1, 1, 100), Pet(21, "Tank B", 1, 1, 100)]
+        parrot.experience = 2
+        enemies = [
+            Pet(20, "Tank A", 1, 1, 100),
+            Pet(21, "Tank B", 1, 1, 100),
+            Pet(22, "Tank C", 1, 1, 100),
+        ]
         result = self.simulator.simulate(
             Team.from_pets([mosquito, parrot]), Team.from_pets(enemies), seed=5
         )
         first_attack = next(index for index, line in enumerate(result.log) if " attacks " in line)
         pre_attack_damage = [line for line in result.log[:first_attack] if "takes 1" in line]
-        self.assertEqual(len(pre_attack_damage), 2)
+        self.assertEqual(len(pre_attack_damage), 3)
+
+    def test_whale_activates_swallowed_deer_faint_ability(self):
+        deer = self.catalog.pet_by_name("Deer").create()
+        whale = self.catalog.pet_by_name("Whale").create()
+        whale.health = 100
+        enemy = Pet(20, "Tank", 1, 1, 100)
+
+        result = self.simulator.simulate(
+            Team.from_pets([deer, whale]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        started = next(
+            frame for frame in result.frames if frame.label == "Start-of-battle abilities resolved"
+        )
+        names = [pet.name for pet in started.player.living()]
+        self.assertEqual(names, ["Bus", "Whale"])
+        bus = started.player.slots[0]
+        self.assertEqual((bus.attack, bus.health, bus.perk), (5, 3, "Chili"))
+        swallowed = next(frame for frame in result.frames if frame.event == "ability")
+        self.assertEqual(swallowed.label, "Whale swallows Deer")
+        self.assertEqual([pet.name for pet in swallowed.player.living()], ["Bus", "Whale"])
+
+    def test_defending_boar_triggers_before_attack(self):
+        boar = self.catalog.pet_by_name("Boar").create()
+        attacker = Pet(20, "Attacker", 1, 1, 200)
+        reserve = Pet(21, "Reserve", 1, 1, 200)
+
+        result = self.simulator.simulate(
+            Team.from_pets([boar]),
+            Team.from_pets([attacker, reserve]),
+            seed=1,
+        )
+
+        first_attack = next(line for line in result.log if "Attacker takes" in line)
+        self.assertIn(f"Attacker takes {boar.attack + 4}", first_attack)
+
+    def test_defending_elephant_triggers_after_attack(self):
+        elephant = self.catalog.pet_by_name("Elephant").create()
+        elephant.experience = 5
+        elephant.health = 100
+        blowfish = self.catalog.pet_by_name("Blowfish").create()
+        blowfish.experience = 2
+        blowfish.health = 100
+        opponents = [
+            Pet(20, "Tank A", 1, 1, 200),
+            Pet(21, "Tank B", 1, 1, 200),
+            Pet(22, "Tank C", 1, 1, 200),
+        ]
+
+        result = self.simulator.simulate(
+            Team.from_pets([elephant, blowfish]),
+            Team.from_pets(opponents),
+            seed=1,
+        )
+
+        second_attack = next(
+            index for index, line in enumerate(result.log[1:], start=1) if " attacks " in line
+        )
+        first_attack_log = result.log[:second_attack]
+        self.assertEqual(sum("takes 6" in line for line in first_attack_log), 3)
+
+    def test_tiger_repeats_friend_summoned_ability_at_tiger_level(self):
+        cricket = self.catalog.pet_by_name("Cricket").create()
+        cricket.health = 1
+        turkey = self.catalog.pet_by_name("Turkey").create()
+        tiger = self.catalog.pet_by_name("Tiger").create()
+        tiger.experience = 2
+        enemy = Pet(20, "Tank", 1, 10, 100)
+
+        result = self.simulator.simulate(
+            Team.from_pets([cricket, turkey, tiger]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        zombies = [
+            pet
+            for frame in result.frames
+            for pet in frame.player.living()
+            if pet.name == "Zombie Cricket"
+        ]
+        self.assertTrue(zombies)
+        self.assertEqual(max(pet.effective_attack for pet in zombies), 10)
+        self.assertEqual(max(pet.effective_health for pet in zombies), 4)
+
+    def test_level_three_elephant_triggers_level_two_blowfish_three_times(self):
+        elephant = self.catalog.pet_by_name("Elephant").create()
+        elephant.experience = 5
+        elephant.attack = 1
+        elephant.health = 100
+        blowfish = self.catalog.pet_by_name("Blowfish").create()
+        blowfish.experience = 2
+        blowfish.health = 100
+        blowfish.temporary_health = 7
+        enemy = Pet(20, "Tank", 1, 1, 200)
+
+        result = self.simulator.simulate(
+            Team.from_pets([elephant, blowfish]),
+            Team.from_pets([enemy]),
+            seed=1,
+        )
+
+        next_attack = next(
+            index for index, line in enumerate(result.log[1:], start=1) if " attacks " in line
+        )
+        first_attack_log = result.log[:next_attack]
+        self.assertEqual(sum("Tank takes 6" in line for line in first_attack_log), 3)
 
     def test_turtle_tokens_and_no_ability_catalog_pets_are_supported(self):
         token_names = (

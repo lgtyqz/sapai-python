@@ -30,6 +30,8 @@ class ShopEnvironment:
     This makes transitions reproducible and suitable for MCTS.
     """
 
+    SLOTH_ROLL_DENOMINATOR = 10_000
+
     def __init__(self, catalog: Catalog, abilities: ShopAbilityEngine | None = None):
         self.catalog = catalog
         self.abilities = abilities or ShopAbilityEngine(catalog)
@@ -63,10 +65,18 @@ class ShopEnvironment:
             raise ValueError(f"catalog contains no rollable entries for pack {state.pack!r}")
 
         pets = frozen_pets
-        for _ in range(max(0, self.pet_slots(state.tier) - len(frozen_pets))):
-            pet = rng.choice(pet_pool).create(instance_id=state.allocate_instance_id())
+        open_pet_slots = max(0, self.pet_slots(state.tier) - len(frozen_pets))
+        rolled_sloth = open_pet_slots > 0 and rng.randrange(self.SLOTH_ROLL_DENOMINATOR) == 0
+        for slot in range(open_pet_slots):
+            spec = (
+                self.catalog.pet_by_name("Sloth")
+                if rolled_sloth and slot == 0
+                else rng.choice(pet_pool)
+            )
+            pet = spec.create(instance_id=state.allocate_instance_id())
             pet.buff(state.shop_attack, state.shop_health)
             pets.append(ShopPet(pet))
+        self._sort_shop_pets(pets)
 
         foods = frozen_foods
         for _ in range(max(0, self.food_slots(state.tier) - len(frozen_foods))):
@@ -151,8 +161,7 @@ class ShopEnvironment:
         elif kind is ActionKind.BUY_MERGE_PET:
             offer = new.shop.pets[action.source]
             target = new.team.slots[action.target]
-            target.attack = max(target.attack, offer.pet.attack)  # type: ignore[union-attr]
-            target.health = max(target.health, offer.pet.health)  # type: ignore[union-attr]
+            self._merge_pet_stats(target, offer.pet)  # type: ignore[arg-type]
             self._remove_pet_offer(new, action.source)
             self._spend(new, 3)
             self._give_experience(new, action.target, 1, rng)
@@ -160,8 +169,7 @@ class ShopEnvironment:
         elif kind is ActionKind.MERGE_BOARD_PET:
             source = new.team.slots[action.source]
             target = new.team.slots[action.target]
-            target.attack = max(target.attack, source.attack)  # type: ignore[union-attr]
-            target.health = max(target.health, source.health)  # type: ignore[union-attr]
+            self._merge_pet_stats(target, source)  # type: ignore[arg-type]
             amount = source.experience + 1  # type: ignore[union-attr]
             new.team.slots[action.source] = None
             self._give_experience(new, action.target, amount, rng)
@@ -191,7 +199,9 @@ class ShopEnvironment:
             # The base sale payout happens before the pet's sell ability. In
             # particular, a level-one Pig receives one base gold and then one
             # additional gold from its ability.
-            new.gold += pet.level  # type: ignore[union-attr]
+            new.gold += pet.level + int(  # type: ignore[union-attr]
+                pet.metadata.get("sell_value_bonus", 0)  # type: ignore[union-attr]
+            )
             self.abilities.on_sell(new, action.source, rng)
             new.team.slots[action.source] = None
         elif kind is ActionKind.REORDER:
@@ -245,6 +255,24 @@ class ShopEnvironment:
         else:
             state.shop.pets[:] = [offer for offer in state.shop.pets if offer.reward_group != group]
 
+    @staticmethod
+    def _merge_pet_stats(target: Pet, source: Pet) -> None:
+        """Merge base stats while preserving temporary bonuses as bonuses."""
+
+        target.attack = max(target.attack, source.attack)
+        target.health = max(target.health, source.health)
+        target.temporary_attack = max(target.temporary_attack, source.temporary_attack)
+        target.temporary_health = max(target.temporary_health, source.temporary_health)
+
+    @staticmethod
+    def _sort_shop_pets(pets: list[ShopPet]) -> None:
+        # Same-tier offers retain their roll order. Sloth is the sole tier-order
+        # exception and is always displayed at the far left when it appears.
+        pets.sort(
+            key=lambda offer: (offer.pet.name == "Sloth", offer.pet.tier),
+            reverse=True,
+        )
+
     def _give_experience(
         self, state: RunState, index: int, amount: int, rng: random.Random
     ) -> None:
@@ -278,7 +306,8 @@ class ShopEnvironment:
             pet = spec.create(instance_id=state.allocate_instance_id())
             pet.buff(state.shop_attack, state.shop_health)
             offers.append(ShopPet(pet, reward_group=group))
-        state.shop.pets[0:0] = offers
+        state.shop.pets.extend(offers)
+        self._sort_shop_pets(state.shop.pets)
 
     def _shop_faint(self, state: RunState, index: int, rng: random.Random) -> None:
         self._process_shop_faint(state, index, rng)
