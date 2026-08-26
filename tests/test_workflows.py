@@ -298,6 +298,7 @@ class ArenaWorkflowTest(unittest.TestCase):
                 return runner.run(pack=pack, seed=seed)
 
         counting = CountingRunner()
+        progress = []
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "arena.jsonl"
@@ -310,6 +311,9 @@ class ArenaWorkflowTest(unittest.TestCase):
                 pack="Turtle",
                 seed=9,
                 identity={"policy": "test"},
+                progress=lambda completed, total, reused: progress.append(
+                    (completed, total, reused)
+                ),
             )
             output.unlink()
             second = _generate_episode_dataset(
@@ -320,11 +324,15 @@ class ArenaWorkflowTest(unittest.TestCase):
                 pack="Turtle",
                 seed=9,
                 identity={"policy": "test"},
+                progress=lambda completed, total, reused: progress.append(
+                    (completed, total, reused)
+                ),
             )
 
         self.assertGreater(first, 0)
         self.assertEqual(second, first)
         self.assertEqual(counting.calls, 1)
+        self.assertEqual(progress, [(1, 1, False), (1, 1, True)])
 
 
 if __name__ == "__main__":

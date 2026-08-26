@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ from sapai.ml.models import (
 )
 from sapai.ml.training import BattleTrainer, encode_battle_examples
 from sapai.training.arena import ArenaDecision, read_arena_decisions
+
+ProgressCallback = Callable[[str, Mapping[str, object]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,7 @@ def train_battle_model(
     training_config: TrainingConfig | None = None,
     model_config: ModelConfig | None = None,
     resume: bool = True,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     tf = _tensorflow()
     training = training_config or TrainingConfig()
@@ -176,6 +180,21 @@ def train_battle_model(
         output=output,
         resume=resume,
     )
+    if progress is not None:
+        progress(
+            "training_started",
+            {
+                "completed": restored_epoch,
+                "total": training.epochs,
+                "train_examples": len(train),
+                "validation_examples": len(validation),
+                "batches_per_epoch": (
+                    len(train) + training.batch_size - 1
+                )
+                // training.batch_size,
+                "restored_checkpoint": restored_checkpoint,
+            },
+        )
 
     rng = random.Random(training.seed + int(completed_epochs.numpy()))
     history = _read_history(output)
@@ -196,6 +215,16 @@ def train_battle_model(
         _save_epoch_weights(model, output, epoch + 1, manager.checkpoints)
         manager.save(checkpoint_number=epoch + 1)
         _save_history(output, history)
+        if progress is not None:
+            progress(
+                "epoch_completed",
+                {
+                    "completed": epoch + 1,
+                    "total": training.epochs,
+                    "metrics": row,
+                    "checkpoint": manager.latest_checkpoint,
+                },
+            )
     model.save_weights(output / "battle.weights.h5")
     return {
         "epochs": int(completed_epochs.numpy()),
@@ -277,6 +306,7 @@ def train_policy_model(
     training_config: TrainingConfig | None = None,
     model_config: ModelConfig | None = None,
     resume: bool = True,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     tf = _tensorflow()
     training = training_config or TrainingConfig()
@@ -320,6 +350,21 @@ def train_policy_model(
         output=output,
         resume=resume,
     )
+    if progress is not None:
+        progress(
+            "training_started",
+            {
+                "completed": restored_epoch,
+                "total": training.epochs,
+                "train_examples": len(train),
+                "validation_examples": len(validation),
+                "batches_per_epoch": (
+                    len(train) + training.batch_size - 1
+                )
+                // training.batch_size,
+                "restored_checkpoint": restored_checkpoint,
+            },
+        )
 
     rng = random.Random(training.seed + int(completed_epochs.numpy()))
     history = _read_history(output)
@@ -345,6 +390,16 @@ def train_policy_model(
         _save_epoch_weights(model, output, epoch + 1, manager.checkpoints)
         manager.save(checkpoint_number=epoch + 1)
         _save_history(output, history)
+        if progress is not None:
+            progress(
+                "epoch_completed",
+                {
+                    "completed": epoch + 1,
+                    "total": training.epochs,
+                    "metrics": row,
+                    "checkpoint": manager.latest_checkpoint,
+                },
+            )
     model.save_weights(output / "policy.weights.h5")
     return {
         "epochs": int(completed_epochs.numpy()),

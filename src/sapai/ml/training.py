@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from sapai.data.replay import BoardSnapshot
@@ -27,6 +27,7 @@ def label_board_pairs(
     examples: int,
     simulations_per_pair: int = 8,
     seed: int = 0,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[BattleExample]:
     """Sample compatible boards and label them with the native simulator."""
 
@@ -46,7 +47,8 @@ def label_board_pairs(
         pairs.append((player, opponent))
 
     labeled: list[BattleExample] = []
-    for player, opponent in pairs:
+    progress_interval = max(1, examples // 20)
+    for index, (player, opponent) in enumerate(pairs, start=1):
         counts = {kind: 0 for kind in BattleResultKind}
         for _ in range(simulations_per_pair):
             result = simulator.simulate(
@@ -70,6 +72,10 @@ def label_board_pairs(
                 ),
             )
         )
+        if progress is not None and (
+            index == 1 or index == examples or index % progress_interval == 0
+        ):
+            progress(index, examples)
     return labeled
 
 

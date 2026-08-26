@@ -655,6 +655,7 @@ class HumanArenaSessionTest(unittest.TestCase):
     def test_training_notebook_contains_a_guarded_parseable_launcher(self):
         path = Path(__file__).resolve().parents[1] / "notebooks" / "sapai_colab_training.ipynb"
         notebook = json.loads(path.read_text(encoding="utf-8"))
+        source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         config = "".join(notebook["cells"][1]["source"])
         launcher = "".join(notebook["cells"][-1]["source"])
         self.assertIn("RUN_HUMAN_BENCHMARK = False", config)
@@ -663,6 +664,7 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("load_opponent_population(BOARDS_FOR_RUN", launcher)
         self.assertIn("display_human_arena", launcher)
         self.assertIn("version_on_mismatch=True", launcher)
+        self.assertIn("'--progress'", source)
         ast.parse(launcher)
 
     def test_kaggle_notebook_is_native_guarded_and_parseable(self):
@@ -675,6 +677,7 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("UserSecretsClient().get_secret('DATABASE_URL')", source)
         self.assertIn("display_human_arena_widget", source)
         self.assertIn("version_on_mismatch=True", source)
+        self.assertIn("'--progress'", source)
         self.assertNotIn("anywidget", source.lower())
         self.assertNotIn("google.colab", source)
         self.assertNotIn("/content/", source)

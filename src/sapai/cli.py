@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import os
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -175,6 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument("--seed", type=int, default=0)
     sequence.add_argument("--search-simulations", type=int, default=32)
     sequence.add_argument("--search-candidates", type=int, default=8)
+    sequence.add_argument(
+        "--progress",
+        action="store_true",
+        help="print flushed stage, rollout, and epoch progress for notebook runs",
+    )
     return parser
 
 
@@ -280,6 +287,7 @@ def _generate_episode_dataset(
     pack: str,
     seed: int,
     identity: dict[str, object],
+    progress: Callable[[int, int, bool], None] | None = None,
 ) -> int:
     """Checkpoint each rollout separately, then assemble the training JSONL."""
 
@@ -302,17 +310,24 @@ def _generate_episode_dataset(
             raise ValueError(f"Arena episodes have no manifest: {episode_dir}")
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     paths: list[Path] = []
+    progress_interval = max(1, episodes // 20)
     for episode in range(episodes):
         episode_path = episode_dir / f"{episode:06d}.jsonl"
         paths.append(episode_path)
+        reused = episode_path.exists()
         if episode_path.exists():
             if not read_arena_decisions(episode_path):
                 raise ValueError(f"checkpointed Arena episode is empty: {episode_path}")
-            continue
-        decisions = runner.run(pack=pack, seed=seed + episode).decisions
-        temporary = episode_path.with_suffix(".jsonl.tmp")
-        write_arena_decisions(temporary, decisions)
-        temporary.replace(episode_path)
+        else:
+            decisions = runner.run(pack=pack, seed=seed + episode).decisions
+            temporary = episode_path.with_suffix(".jsonl.tmp")
+            write_arena_decisions(temporary, decisions)
+            temporary.replace(episode_path)
+        completed = episode + 1
+        if progress is not None and (
+            completed == 1 or completed == episodes or completed % progress_interval == 0
+        ):
+            progress(completed, episodes, reused)
 
     combined = []
     for episode_path in paths:
@@ -330,6 +345,7 @@ def _battle_dataset_for_sequence(
     seed: int,
     pack: str,
     boards_sha256: str,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, object]:
     from sapai.data.datasets import build_battle_dataset
 
@@ -373,18 +389,74 @@ def _battle_dataset_for_sequence(
         examples=examples,
         simulations_per_pair=simulations_per_pair,
         seed=seed,
+        progress=progress,
     )
     identity_path.write_text(json.dumps(identity, indent=2), encoding="utf-8")
     return manifest
 
 
+def _training_progress_logger() -> Callable[[str, Mapping[str, object]], None]:
+    started = time.monotonic()
+
+    def report(event: str, payload: Mapping[str, object]) -> None:
+        elapsed = max(0, round(time.monotonic() - started))
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        stage = str(payload.get("stage", "sequence"))
+        message = str(payload.get("message", event.replace("_", " ")))
+        parts = [f"[progress {hours:02d}:{minutes:02d}:{seconds:02d}]", stage, message]
+        completed = payload.get("completed")
+        total = payload.get("total")
+        if isinstance(completed, int) and isinstance(total, int) and total > 0:
+            percent = min(100.0, max(0.0, completed * 100.0 / total))
+            parts.append(f"{completed}/{total} ({percent:.1f}%)")
+        metrics = payload.get("metrics")
+        if isinstance(metrics, Mapping):
+            formatted = [
+                f"{key}={float(value):.5f}"
+                for key, value in sorted(metrics.items())
+                if key != "epoch" and isinstance(value, (int, float))
+            ]
+            if formatted:
+                parts.append(" ".join(formatted))
+        checkpoint = payload.get("checkpoint") or payload.get("restored_checkpoint")
+        if checkpoint:
+            parts.append(f"checkpoint={checkpoint}")
+        print(" | ".join(parts), flush=True)
+
+    return report
+
+
 def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     from sapai.ml.pipelines import train_battle_model, train_policy_model
 
+    progress = _training_progress_logger() if getattr(args, "progress", False) else None
+
+    def emit(stage: str, message: str, **values: object) -> None:
+        if progress is not None:
+            progress("stage", {"stage": stage, "message": message, **values})
+
+    def training_progress(stage: str):
+        if progress is None:
+            return None
+
+        def report(event: str, payload: Mapping[str, object]) -> None:
+            message = (
+                "epoch checkpoint saved"
+                if event == "epoch_completed"
+                else "training initialized"
+            )
+            progress(event, {"stage": stage, "message": message, **payload})
+
+        return report
+
     root = Path(args.workdir)
+    emit("sequence", f"starting full run in {root}")
     boards = load_opponent_boards(args.boards, catalog, args.pack)
     boards_sha256 = _file_sha256(args.boards)
+    emit("boards", f"loaded {len(boards)} compatible {args.pack} boards")
     battle_dataset = root / "battle-dataset"
+    emit("battle-labels", "building or validating battle dataset")
     manifest = _battle_dataset_for_sequence(
         boards,
         battle_dataset,
@@ -394,14 +466,34 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         seed=args.seed,
         pack=args.pack,
         boards_sha256=boards_sha256,
+        progress=(
+            lambda split, completed, total: emit(
+                f"battle-labels/{split}",
+                "labeled board pairs",
+                completed=completed,
+                total=total,
+            )
+        )
+        if progress is not None
+        else None,
     )
+    emit("battle-labels", "battle dataset ready")
+    emit("battle-training", "loading model and checkpoint")
     battle_summary = train_battle_model(
         battle_dataset,
         root / "battle-model",
         training_config=_training_config(args, epochs=args.battle_epochs),
+        progress=training_progress("battle-training"),
+    )
+    emit(
+        "battle-training",
+        "battle model ready",
+        completed=args.battle_epochs,
+        total=args.battle_epochs,
     )
     population = OpponentPopulation(boards)
     population.save_encoded_cache(root / "population.npz")
+    emit("population", f"cached {len(boards)} encoded opponents")
 
     environment = ShopEnvironment(catalog)
     bootstrap_runner = ArenaRunner(
@@ -411,6 +503,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         HeuristicPolicy(),
     )
     bootstrap_path = root / "arena-bootstrap.jsonl"
+    emit("bootstrap-rollouts", "generating or reusing heuristic Arena episodes")
     bootstrap_decisions = _generate_episode_dataset(
         bootstrap_runner,
         bootstrap_path,
@@ -423,12 +516,31 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             "boards_sha256": boards_sha256,
             "episodes": args.bootstrap_episodes,
         },
+        progress=(
+            lambda completed, total, reused: emit(
+                "bootstrap-rollouts",
+                "episode checkpoint reused" if reused else "episode checkpoint saved",
+                completed=completed,
+                total=total,
+            )
+        )
+        if progress is not None
+        else None,
     )
+    emit("bootstrap-rollouts", f"assembled {bootstrap_decisions} policy decisions")
     policy_dir = root / "policy-model"
+    emit("bootstrap-training", "loading policy model and checkpoint")
     bootstrap_summary = train_policy_model(
         bootstrap_path,
         policy_dir,
         training_config=_training_config(args, epochs=args.bootstrap_epochs),
+        progress=training_progress("bootstrap-training"),
+    )
+    emit(
+        "bootstrap-training",
+        "bootstrap policy ready",
+        completed=args.bootstrap_epochs,
+        total=args.bootstrap_epochs,
     )
 
     policy_args = argparse.Namespace(
@@ -446,6 +558,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         _arena_policy(policy_args, environment),
     )
     search_path = root / "arena-search.jsonl"
+    emit("search-rollouts", "generating or reusing search-guided Arena episodes")
     search_decisions = _generate_episode_dataset(
         search_runner,
         search_path,
@@ -463,7 +576,19 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             "search_simulations": args.search_simulations,
             "search_candidates": args.search_candidates,
         },
+        progress=(
+            lambda completed, total, reused: emit(
+                "search-rollouts",
+                "episode checkpoint reused" if reused else "episode checkpoint saved",
+                completed=completed,
+                total=total,
+            )
+        )
+        if progress is not None
+        else None,
     )
+    emit("search-rollouts", f"assembled {search_decisions} policy decisions")
+    emit("distillation-training", "restoring policy model for search distillation")
     distill_summary = train_policy_model(
         search_path,
         policy_dir,
@@ -471,6 +596,13 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             args, epochs=args.bootstrap_epochs + args.search_epochs
         ),
         resume=True,
+        progress=training_progress("distillation-training"),
+    )
+    emit(
+        "distillation-training",
+        "distilled policy ready",
+        completed=args.bootstrap_epochs + args.search_epochs,
+        total=args.bootstrap_epochs + args.search_epochs,
     )
     summary = {
         "battle_dataset": manifest,
@@ -482,6 +614,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     }
     root.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    emit("sequence", f"full training complete; summary saved to {root / 'summary.json'}")
     return summary
 
 

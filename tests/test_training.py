@@ -24,6 +24,28 @@ class TrainingDataTest(unittest.TestCase):
         )
         self.assertEqual(examples[0].target, (0.0, 1.0, 0.0))
 
+    def test_label_progress_reports_first_intermediate_and_final_counts(self):
+        current_catalog = catalog()
+        ant = current_catalog.pet_by_name("Ant")
+        boards = [
+            BoardSnapshot(str(index), "player", 1, "Turtle", Team.from_pets([ant.create()]))
+            for index in range(2)
+        ]
+        updates = []
+
+        label_board_pairs(
+            boards,
+            BattleSimulator(current_catalog),
+            examples=40,
+            simulations_per_pair=1,
+            seed=1,
+            progress=lambda completed, total: updates.append((completed, total)),
+        )
+
+        self.assertEqual(updates[0], (1, 40))
+        self.assertEqual(updates[-1], (40, 40))
+        self.assertIn((20, 40), updates)
+
 
 if __name__ == "__main__":
     unittest.main()

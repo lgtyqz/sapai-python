@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -103,6 +103,7 @@ def build_battle_dataset(
     validation_fraction: float = 0.1,
     test_fraction: float = 0.1,
     seed: int = 0,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Split first, then label pairs independently within each split."""
 
@@ -140,6 +141,13 @@ def build_battle_dataset(
                     examples=requested,
                     simulations_per_pair=simulations_per_pair,
                     seed=seed + index,
+                    progress=(
+                        (lambda completed, total, name=split_name: progress(
+                            name, completed, total
+                        ))
+                        if progress is not None
+                        else None
+                    ),
                 )
             except ValueError as error:
                 raise ValueError(
