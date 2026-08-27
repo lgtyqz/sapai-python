@@ -226,7 +226,13 @@ class ArenaRunner:
                 decision.next_battle = target
             state = self.environment.apply_outcome(state, outcome, rng).state
 
-        run_value = 1.0 if state.trophies >= 10 else -1.0
+
+        # Create a reward that ramps up!
+        # But heavily rewards winning (10 trophies)
+        if state.trophies >= 10:
+            run_value = 1
+        else:
+            run_value = (state.trophies ** 2) / 200
         for decision in decisions:
             decision.run_value = run_value
             decision.expected_wins = float(state.trophies)
