@@ -15,6 +15,11 @@ class Evaluator(Protocol):
         """Return action probabilities and a run value in ``[-1, 1]``."""
 
 
+class BattleLeafEvaluator(Protocol):
+    def evaluate_battle(self, state: RunState, rng: random.Random) -> float:
+        """Return a run value for a state waiting on its Arena battle."""
+
+
 class UniformEvaluator:
     def evaluate(self, state: RunState, actions: list[Action]) -> tuple[list[float], float]:
         probability = 1.0 / max(1, len(actions))
@@ -75,10 +80,12 @@ class PolicyGuidedSearch:
         environment: ShopEnvironment,
         evaluator: Evaluator,
         config: SearchConfig | None = None,
+        battle_evaluator: BattleLeafEvaluator | None = None,
     ) -> None:
         self.environment = environment
         self.evaluator = evaluator
         self.config = config or SearchConfig()
+        self.battle_evaluator = battle_evaluator
         self.transpositions: dict[str, Node] = {}
 
     def search(self, state: RunState, *, seed: int | None = None) -> SearchResult:
@@ -130,11 +137,24 @@ class PolicyGuidedSearch:
                 score += self.config.gumbel_scale * gumbel
             scored.append((score, action, prior))
         scored.sort(key=lambda item: item[0], reverse=True)
-        for _, action, prior in scored[: self.config.candidate_actions]:
+        candidate_count = max(1, self.config.candidate_actions)
+        kept = scored[:candidate_count]
+        end_turn = next(
+            (item for item in scored if item[1].kind is ActionKind.END_TURN),
+            None,
+        )
+        if end_turn is not None and all(item[1] != end_turn[1] for item in kept):
+            kept[-1] = end_turn
+        for _, action, prior in kept:
             node.edges[action] = Edge(action, prior)
         kept_total = sum(edge.prior for edge in node.edges.values())
-        for edge in node.edges.values():
-            edge.prior /= kept_total
+        if kept_total:
+            for edge in node.edges.values():
+                edge.prior /= kept_total
+        else:
+            uniform_prior = 1.0 / len(node.edges)
+            for edge in node.edges.values():
+                edge.prior = uniform_prior
         node.expanded = True
         node.value_prior = float(value)
         return float(value)
@@ -150,7 +170,21 @@ class PolicyGuidedSearch:
         key = node.state.canonical_key()
         if key in seen:
             return node.value
-        if depth >= self.config.max_depth or node.state.awaiting_battle:
+        if node.state.awaiting_battle:
+            if node.expanded:
+                value = node.value_prior
+            elif self.battle_evaluator is None:
+                value = self._expand(node, rng)
+            else:
+                value = float(self.battle_evaluator.evaluate_battle(node.state, rng))
+                if not math.isfinite(value):
+                    raise ValueError("battle evaluator returned a non-finite value")
+                node.expanded = True
+                node.value_prior = value
+            node.visits += 1
+            node.value_sum += value
+            return value
+        if depth >= self.config.max_depth:
             value = node.value_prior if node.expanded else self._expand(node, rng)
             node.visits += 1
             node.value_sum += value

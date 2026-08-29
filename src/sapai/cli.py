@@ -27,6 +27,7 @@ from sapai.training.arena import (
 )
 from sapai.training.population import (
     OpponentPopulation,
+    SimulatorPopulationEvaluator,
     load_opponent_boards,
     load_opponent_population,
 )
@@ -74,6 +75,12 @@ def _add_arena_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-decisions-per-turn", type=int, default=30)
     parser.add_argument("--search-simulations", type=int, default=32)
     parser.add_argument("--search-candidates", type=int, default=8)
+    parser.add_argument(
+        "--battle-evaluation-simulations",
+        type=int,
+        default=8,
+        help="exact opponent battles sampled for each end-turn search leaf",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -161,14 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
     visualize_arena.add_argument("--output", default="outputs/arena.html")
 
     sequence = commands.add_parser(
-        "train-sequence", help="run labels, battle training, bootstrap, and search distillation"
+        "train-sequence", help="run policy bootstrap and simulator-guided search distillation"
     )
     sequence.add_argument("--boards", required=True)
     sequence.add_argument("--workdir", required=True)
     sequence.add_argument("--pack", default="Turtle", choices=("Turtle",))
-    sequence.add_argument("--battle-examples", type=int, default=10_000)
-    sequence.add_argument("--simulations-per-pair", type=int, default=8)
-    sequence.add_argument("--battle-epochs", type=int, default=10)
     sequence.add_argument("--bootstrap-episodes", type=int, default=100)
     sequence.add_argument("--bootstrap-epochs", type=int, default=10)
     sequence.add_argument("--search-episodes", type=int, default=50)
@@ -177,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument("--seed", type=int, default=0)
     sequence.add_argument("--search-simulations", type=int, default=32)
     sequence.add_argument("--search-candidates", type=int, default=8)
+    sequence.add_argument("--battle-evaluation-simulations", type=int, default=8)
     sequence.add_argument(
         "--progress",
         action="store_true",
@@ -205,7 +210,13 @@ def _model_config_from_weights(weights: str | Path) -> tuple[ModelConfig, Path]:
     return config, directory / "policy.weights.h5" if path.is_dir() else path
 
 
-def _arena_policy(args, environment: ShopEnvironment):
+def _arena_policy(
+    args,
+    environment: ShopEnvironment,
+    *,
+    battle: BattleSimulator | None = None,
+    population: OpponentPopulation | None = None,
+):
     if args.policy == "heuristic":
         return HeuristicPolicy()
     if args.policy == "random":
@@ -237,6 +248,15 @@ def _arena_policy(args, environment: ShopEnvironment):
 
     if args.policy == "model":
         return ModelPolicy(evaluator)
+    if battle is None or population is None:
+        raise ValueError("search policy requires a battle simulator and opponent population")
+    battle_evaluator = SimulatorPopulationEvaluator(
+        environment,
+        battle,
+        population,
+        simulations=args.battle_evaluation_simulations,
+        continuation_evaluator=evaluator if args.policy_weights else None,
+    )
     search = PolicyGuidedSearch(
         environment,
         evaluator,
@@ -244,17 +264,20 @@ def _arena_policy(args, environment: ShopEnvironment):
             simulations=args.search_simulations,
             candidate_actions=args.search_candidates,
         ),
+        battle_evaluator=battle_evaluator,
     )
     return SearchPolicy(search)
 
 
 def _runner(args, catalog: Catalog) -> ArenaRunner:
     environment = ShopEnvironment(catalog)
+    battle = BattleSimulator(catalog)
+    population = _population(args, catalog)
     return ArenaRunner(
         environment,
-        BattleSimulator(catalog),
-        _population(args, catalog),
-        _arena_policy(args, environment),
+        battle,
+        population,
+        _arena_policy(args, environment, battle=battle, population=population),
         max_decisions_per_turn=args.max_decisions_per_turn,
     )
 
@@ -428,7 +451,7 @@ def _training_progress_logger() -> Callable[[str, Mapping[str, object]], None]:
 
 
 def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
-    from sapai.ml.pipelines import train_battle_model, train_policy_model
+    from sapai.ml.pipelines import train_policy_model
 
     progress = _training_progress_logger() if getattr(args, "progress", False) else None
 
@@ -455,45 +478,8 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     boards = load_opponent_boards(args.boards, catalog, args.pack)
     boards_sha256 = _file_sha256(args.boards)
     emit("boards", f"loaded {len(boards)} compatible {args.pack} boards")
-    battle_dataset = root / "battle-dataset"
-    emit("battle-labels", "building or validating battle dataset")
-    manifest = _battle_dataset_for_sequence(
-        boards,
-        battle_dataset,
-        BattleSimulator(catalog),
-        examples=args.battle_examples,
-        simulations_per_pair=args.simulations_per_pair,
-        seed=args.seed,
-        pack=args.pack,
-        boards_sha256=boards_sha256,
-        progress=(
-            lambda split, completed, total: emit(
-                f"battle-labels/{split}",
-                "labeled board pairs",
-                completed=completed,
-                total=total,
-            )
-        )
-        if progress is not None
-        else None,
-    )
-    emit("battle-labels", "battle dataset ready")
-    emit("battle-training", "loading model and checkpoint")
-    battle_summary = train_battle_model(
-        battle_dataset,
-        root / "battle-model",
-        training_config=_training_config(args, epochs=args.battle_epochs),
-        progress=training_progress("battle-training"),
-    )
-    emit(
-        "battle-training",
-        "battle model ready",
-        completed=args.battle_epochs,
-        total=args.battle_epochs,
-    )
     population = OpponentPopulation(boards)
-    population.save_encoded_cache(root / "population.npz")
-    emit("population", f"cached {len(boards)} encoded opponents")
+    emit("population", f"prepared {len(boards)} simulator opponents")
 
     environment = ShopEnvironment(catalog)
     bootstrap_runner = ArenaRunner(
@@ -550,12 +536,19 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         seed=args.seed,
         search_simulations=args.search_simulations,
         search_candidates=args.search_candidates,
+        battle_evaluation_simulations=args.battle_evaluation_simulations,
     )
+    search_battle = BattleSimulator(catalog)
     search_runner = ArenaRunner(
         environment,
-        BattleSimulator(catalog),
+        search_battle,
         population,
-        _arena_policy(policy_args, environment),
+        _arena_policy(
+            policy_args,
+            environment,
+            battle=search_battle,
+            population=population,
+        ),
     )
     search_path = root / "arena-search.jsonl"
     emit("search-rollouts", "generating or reusing search-guided Arena episodes")
@@ -575,6 +568,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             "batch_size": args.batch_size,
             "search_simulations": args.search_simulations,
             "search_candidates": args.search_candidates,
+            "battle_evaluation_simulations": args.battle_evaluation_simulations,
         },
         progress=(
             lambda completed, total, reused: emit(
@@ -605,8 +599,11 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         total=args.bootstrap_epochs + args.search_epochs,
     )
     summary = {
-        "battle_dataset": manifest,
-        "battle_training": battle_summary,
+        "battle_evaluation": {
+            "kind": "native-simulator",
+            "simulations_per_leaf": args.battle_evaluation_simulations,
+            "opponents": len(boards),
+        },
         "bootstrap_decisions": bootstrap_decisions,
         "bootstrap_training": bootstrap_summary,
         "search_decisions": search_decisions,

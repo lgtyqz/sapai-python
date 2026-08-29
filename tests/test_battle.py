@@ -113,6 +113,67 @@ class BattleSimulatorTest(unittest.TestCase):
         first_attack_log = result.log[:second_attack]
         self.assertEqual(sum("takes 6" in line for line in first_attack_log), 3)
 
+    def test_defending_hippo_triggers_knockout_from_retaliation(self):
+        hippo = self.catalog.pet_by_name("Hippo").create()
+        hippo.attack = 10
+        hippo.health = 100
+        opponents = [
+            Pet(20, "Weakling", 1, 1, 1),
+            Pet(21, "Reserve", 1, 1, 100),
+        ]
+
+        result = self.simulator.simulate(
+            Team.from_pets([hippo]),
+            Team.from_pets(opponents),
+            seed=1,
+        )
+
+        first_round = next(frame for frame in result.frames if frame.label == "Round 1 resolved")
+        surviving_hippo = first_round.player.slots[0]
+        self.assertEqual(surviving_hippo.temporary_attack, 3)
+        self.assertEqual(surviving_hippo.metadata["battle"]["uses"]["Hippo:knockout:0"], 1)
+
+    def test_rhino_knockout_damage_chains_into_more_knockouts(self):
+        rhino = self.catalog.pet_by_name("Rhino").create()
+        rhino.attack = 10
+        rhino.health = 100
+        opponents = [
+            Pet(20, "Weakling", 2, 1, 1),
+            Pet(21, "Target A", 2, 1, 4),
+            Pet(22, "Target B", 2, 1, 4),
+        ]
+
+        result = self.simulator.simulate(
+            Team.from_pets([rhino]),
+            Team.from_pets(opponents),
+            seed=1,
+        )
+
+        self.assertEqual(result.outcome, BattleResultKind.PLAYER_WIN)
+        self.assertEqual(sum("takes 4" in line for line in result.log), 2)
+
+    def test_hippo_chili_splash_knockout_triggers_ability(self):
+        hippo = self.catalog.pet_by_name("Hippo").create()
+        hippo.attack = 1
+        hippo.health = 100
+        hippo.perk = "Chili"
+        opponents = [
+            Pet(20, "Tank", 2, 1, 100),
+            Pet(21, "Splash Target", 2, 1, 5),
+        ]
+
+        result = self.simulator.simulate(
+            Team.from_pets([hippo]),
+            Team.from_pets(opponents),
+            seed=1,
+        )
+
+        first_round = next(frame for frame in result.frames if frame.label == "Round 1 resolved")
+        surviving_hippo = first_round.player.slots[0]
+        self.assertEqual(first_round.opponent.slots[0].name, "Tank")
+        self.assertEqual(surviving_hippo.temporary_attack, 3)
+        self.assertEqual(surviving_hippo.metadata["battle"]["uses"]["Hippo:knockout:0"], 1)
+
     def test_tiger_repeats_friend_summoned_ability_at_tiger_level(self):
         cricket = self.catalog.pet_by_name("Cricket").create()
         cricket.health = 1

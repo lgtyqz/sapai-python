@@ -6,12 +6,16 @@ import json
 import random
 from collections import defaultdict
 from pathlib import Path
+from typing import Any, ClassVar
 
 from sapai.data.replay import BoardSnapshot, board_is_pack_compatible
 from sapai.data.serialization import read_boards
 from sapai.ml.encoding import encode_teams
+from sapai.sim.battle import BattleResultKind, BattleSimulator
 from sapai.sim.catalog import Catalog
-from sapai.sim.models import Team
+from sapai.sim.models import BattleOutcome, RunState, Team
+from sapai.sim.shop import ShopEnvironment
+from sapai.training.rewards import arena_run_value
 
 
 def load_opponent_boards(
@@ -141,6 +145,108 @@ class OpponentPopulation:
                     )
                 )
         return cls(boards)
+
+
+class SimulatorPopulationEvaluator:
+    """Evaluate an end-turn state with exact battles against sampled opponents.
+
+    When a continuation evaluator is supplied, each simulated outcome is
+    applied to a cloned run state and the resulting next-turn state is valued
+    in one batch. This keeps the battle leaf on the same final-run value scale
+    as the policy/value network. Without one, conventional win/draw/loss scores
+    of 1/0.5/0 provide a model-free fallback.
+    """
+
+    _OUTCOMES: ClassVar[dict[BattleResultKind, BattleOutcome]] = {
+        BattleResultKind.PLAYER_WIN: BattleOutcome.WIN,
+        BattleResultKind.DRAW: BattleOutcome.DRAW,
+        BattleResultKind.OPPONENT_WIN: BattleOutcome.LOSS,
+    }
+    _SCORES: ClassVar[dict[BattleResultKind, float]] = {
+        BattleResultKind.PLAYER_WIN: 1.0,
+        BattleResultKind.DRAW: 0.5,
+        BattleResultKind.OPPONENT_WIN: 0.0,
+    }
+
+    def __init__(
+        self,
+        environment: ShopEnvironment,
+        simulator: BattleSimulator,
+        population: OpponentPopulation,
+        *,
+        simulations: int = 8,
+        continuation_evaluator: Any | None = None,
+    ) -> None:
+        if simulations < 1:
+            raise ValueError("battle evaluation simulations must be positive")
+        self.environment = environment
+        self.simulator = simulator
+        self.population = population
+        self.simulations = simulations
+        self.continuation_evaluator = continuation_evaluator
+
+    def evaluate_battle(self, state: RunState, rng: random.Random) -> float:
+        if not state.awaiting_battle:
+            raise ValueError("battle evaluation requires an awaiting-battle state")
+
+        outcomes: list[BattleResultKind] = []
+        for _ in range(self.simulations):
+            opponent = self.population.sample(
+                pack=state.pack,
+                turn=state.turn,
+                version=state.version,
+                rng=rng,
+            )
+            outcomes.append(
+                self.simulator.simulate(
+                    state.team,
+                    opponent.team,
+                    seed=rng.getrandbits(63),
+                ).outcome
+            )
+
+        if self.continuation_evaluator is None:
+            return sum(self._SCORES[outcome] for outcome in outcomes) / len(outcomes)
+
+        values: list[float | None] = [None] * len(outcomes)
+        continuation_indices: list[int] = []
+        continuation_states: list[RunState] = []
+        continuation_actions = []
+        for index, outcome in enumerate(outcomes):
+            transition_rng = random.Random(rng.getrandbits(64))
+            next_state = self.environment.apply_outcome(
+                state,
+                self._OUTCOMES[outcome],
+                transition_rng,
+            ).state
+            if next_state.terminal:
+                values[index] = arena_run_value(next_state)
+            else:
+                continuation_indices.append(index)
+                continuation_states.append(next_state)
+                continuation_actions.append(self.environment.legal_actions(next_state))
+
+        if continuation_states:
+            evaluate_many = getattr(self.continuation_evaluator, "evaluate_many", None)
+            if callable(evaluate_many):
+                evaluated = evaluate_many(continuation_states, continuation_actions)
+            else:
+                evaluated = [
+                    self.continuation_evaluator.evaluate(next_state, actions)
+                    for next_state, actions in zip(
+                        continuation_states,
+                        continuation_actions,
+                        strict=True,
+                    )
+                ]
+            if len(evaluated) != len(continuation_states):
+                raise ValueError("continuation evaluator returned the wrong number of values")
+            for index, (_, value) in zip(continuation_indices, evaluated, strict=True):
+                values[index] = float(value)
+
+        if any(value is None for value in values):  # pragma: no cover - defensive invariant
+            raise RuntimeError("battle evaluation did not value every simulated outcome")
+        return sum(float(value) for value in values) / len(values)
 
 
 class BattlePopulationEvaluator:

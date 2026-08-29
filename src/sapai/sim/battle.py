@@ -73,6 +73,7 @@ class BattleSimulator:
         self.events = 0
         self.next_visual_id = 1
         self.team_uses: list[dict[str, int]] = [{}, {}]
+        self.knockouts: list[tuple[int, Pet, Pet]] = []
 
     def simulate(
         self,
@@ -91,6 +92,7 @@ class BattleSimulator:
         self.events = 0
         self.next_visual_id = 1
         self.team_uses = [{}, {}]
+        self.knockouts = []
         for side in (0, 1):
             for pet in self.teams[side]:
                 self._assign_visual_id(pet, replace=True)
@@ -106,7 +108,7 @@ class BattleSimulator:
 
         self._before_start_battle()
         self._start_battle()
-        self._resolve_deaths()
+        self._resolve_combat_events()
         self._capture("Start-of-battle abilities resolved")
 
         if len(self.teams[0]) > len(self.teams[1]):
@@ -215,7 +217,7 @@ class BattleSimulator:
         for _, _, side, pet in events:
             if pet in self.teams[side] and pet.alive:
                 self._execute(side, pet, "start_battle")
-                self._resolve_deaths()
+                self._resolve_combat_events()
 
     def _before_start_battle(self) -> None:
         events = [
@@ -238,7 +240,7 @@ class BattleSimulator:
         for participant_side, participant in participants:
             self._execute(participant_side, participant, "before_attack")
         if not attacker.alive or not defender.alive:
-            self._resolve_deaths()
+            self._resolve_combat_events()
             self._capture(
                 f"Round {round_number} resolved",
                 event="resolve",
@@ -280,14 +282,7 @@ class BattleSimulator:
             target=defender,
         )
 
-        defender_knocked_out = not defender.alive
-        attacker_knocked_out = not attacker.alive
-        self._resolve_deaths()
-        if defender_knocked_out and attacker in self.teams[side]:
-            self._execute(side, attacker, "knockout", trigger_pet=defender)
-        if attacker_knocked_out and defender in self.teams[enemy_side]:
-            self._execute(enemy_side, defender, "knockout", trigger_pet=attacker)
-        self._resolve_deaths()
+        self._resolve_combat_events()
         self._capture(
             f"Round {round_number} resolved",
             event="resolve",
@@ -310,6 +305,7 @@ class BattleSimulator:
     def _damage(self, side: int, target: Pet, amount: int, *, source: Pet | None) -> bool:
         if target not in self.teams[side] or amount <= 0:
             return False
+        was_alive = target.alive
         original = amount
         perk = self.rules.perk_definition(target.perk)
         reduction = int(perk.get("damage_reduction", 0))
@@ -335,7 +331,27 @@ class BattleSimulator:
             for friend in list(self.teams[side]):
                 if friend is not target:
                     self._execute(side, friend, "friend_hurt", trigger_pet=target)
+        if was_alive and not target.alive and source is not None:
+            source_side = self._pet_side(source)
+            if source_side is not None and source_side != side:
+                self.knockouts.append((source_side, source, target))
         return hurt
+
+    def _pet_side(self, pet: Pet) -> int | None:
+        for side, team in enumerate(self.teams):
+            if any(candidate is pet for candidate in team):
+                return side
+        return None
+
+    def _resolve_combat_events(self) -> None:
+        self._resolve_deaths()
+        while self.knockouts:
+            side, source, target = self.knockouts.pop(0)
+            source_present = any(candidate is source for candidate in self.teams[side])
+            if not source_present or not source.alive:
+                continue
+            self._execute(side, source, "knockout", trigger_pet=target)
+            self._resolve_deaths()
 
     def _resolve_deaths(self) -> None:
         while True:

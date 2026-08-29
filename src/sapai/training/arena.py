@@ -21,6 +21,7 @@ from sapai.sim.battle import BattleResult, BattleResultKind, BattleSimulator
 from sapai.sim.models import BattleOutcome, RunState
 from sapai.sim.shop import ShopEnvironment
 from sapai.training.population import OpponentPopulation
+from sapai.training.rewards import arena_run_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,12 +228,7 @@ class ArenaRunner:
             state = self.environment.apply_outcome(state, outcome, rng).state
 
 
-        # Create a reward that ramps up!
-        # But heavily rewards winning (10 trophies)
-        if state.trophies >= 10:
-            run_value = 1
-        else:
-            run_value = (state.trophies ** 2) / 200
+        run_value = arena_run_value(state)
         for decision in decisions:
             decision.run_value = run_value
             decision.expected_wins = float(state.trophies)

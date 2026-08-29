@@ -18,10 +18,10 @@ a friend faints in the shop.
 - Sprite lookup through `assets/data/*NameId*` mappings, including token names.
 - Self-contained battle and Arena HTML visualizations.
 - SAP Library replay parsing and read-only Neon/Postgres ingestion.
-- Stable board, W/D/L, and Arena-decision JSONL formats.
+- Stable board, optional W/D/L, and Arena-decision JSONL formats.
 - Replay-ID-safe train/validation/test splitting and patch/catalog manifests.
-- Checkpointed `BattleModel` and policy/value training with resume support.
-- Empirical opponent populations and cached fixed-shape opponent tensors.
+- Checkpointed policy/value training with resume support.
+- Exact simulator-scored MCTS battle leaves against empirical opponent populations.
 - Complete Arena rollouts using heuristic, random, model, or MCTS policies.
 - Search distillation with 8 root candidates and 32 simulations by default.
 - Batched TensorFlow policy/value evaluation through `evaluate_many`.
@@ -31,7 +31,7 @@ The simulator currently targets Turtle. The rulebook automatically recognizes
 its generated token pets, and catalog pets explicitly described as having no
 ability use exact vanilla combat. Unknown replay pet IDs also use their recorded
 stats as a tagged vanilla fallback so new catalog IDs do not stop ingestion. The
-training-label coverage gate still raises for known ability pets absent from the
+simulator coverage gate still raises for known ability pets absent from the
 pinned rulebook. Unsupported or unknown perks are retained, tagged, reported,
 and treated as no-effect fallbacks so cross-pack replay ailments do not stop a
 run. Boards labeled Turtle but containing known pets exclusive to another pack
@@ -215,48 +215,7 @@ database sample during an epoch.
 The entire sequence is executable. For a first Colab validation run, use small
 counts; increase them after all cells pass.
 
-### 1. Generate native battle labels
-
-Pairs are matched on `(turn, pack, version)`. Whole replay IDs are assigned to
-one split before pairs are sampled, preventing the same run from leaking into
-validation or test data.
-
-```bash
-python -m sapai.cli label-battles \
-  --boards data/boards.jsonl \
-  --output runs/battle-dataset \
-  --examples 100000 \
-  --simulations-per-pair 8 \
-  --seed 2026
-```
-
-### 2. Train the W/D/L battle model
-
-```bash
-python -m sapai.cli train-battle \
-  --dataset runs/battle-dataset \
-  --output runs/battle-model \
-  --epochs 20 \
-  --batch-size 128 \
-  --seed 2026
-```
-
-Every epoch writes a TensorFlow checkpoint and `history.json`. Rerunning the
-same command resumes automatically; pass `--no-resume` for a fresh optimizer.
-
-### 3. Cache the empirical population
-
-```bash
-python -m sapai.cli cache-population \
-  --boards data/boards.jsonl \
-  --output runs/population.npz
-```
-
-This stores stable encoded opponent inputs and metadata. It deliberately does
-not cache model-dependent embeddings, so the file remains valid as weights
-change.
-
-### 4. Bootstrap a no-search policy/value model
+### 1. Bootstrap a no-search policy/value model
 
 ```bash
 python -m sapai.cli generate-arena \
@@ -277,7 +236,7 @@ python -m sapai.cli train-policy \
 Each decision includes the exact legal actions, selected/target policy,
 next-battle W/D/L, terminal run value, and final trophy count.
 
-### 5. Search and distill root visits
+### 2. Search with exact battles and distill root visits
 
 ```bash
 python -m sapai.cli generate-arena \
@@ -286,6 +245,7 @@ python -m sapai.cli generate-arena \
   --policy-weights runs/policy-model \
   --search-candidates 8 \
   --search-simulations 32 \
+  --battle-evaluation-simulations 8 \
   --episodes 250 \
   --output runs/arena-search.jsonl \
   --seed 3026
@@ -301,6 +261,14 @@ python -m sapai.cli train-policy \
 The second policy command resumes the 20-epoch checkpoint and trains through
 epoch 25, so it performs five distillation epochs.
 
+When an MCTS branch reaches `END_TURN`, search samples compatible boards from
+the same empirical opponent population and runs the native simulator. Each
+hypothetical outcome is applied to a cloned Arena state, and the resulting
+next-turn states are evaluated together by the policy value head. Terminal
+outcomes use the exact Arena reward. This avoids both the zero-valued end-turn
+leaf and the approximation error and training cost of a separate battle
+network. `--battle-evaluation-simulations` controls the accuracy/cost tradeoff.
+
 Freeze choices are canonicalized once per shop roll: changing an offer's
 frozen state removes its inverse action until the next roll. MCTS also skips
 deterministic transitions back to an ancestor, so zero-cost action cycles do
@@ -313,25 +281,28 @@ python -m sapai.cli train-sequence \
   --boards data/boards.jsonl \
   --workdir /content/drive/MyDrive/sapai-runs/run-001 \
   --pack Turtle \
-  --battle-examples 100000 \
-  --battle-epochs 20 \
   --bootstrap-episodes 1000 \
   --bootstrap-epochs 20 \
   --search-episodes 250 \
   --search-epochs 5 \
+  --battle-evaluation-simulations 8 \
   --batch-size 128 \
   --seed 2026
 ```
 
-Outputs include manifests, model configs, rolling checkpoints, final weights,
-training histories, opponent tensors, resumable per-episode rollout files, both
-combined trajectory datasets, and a final `summary.json`.
+Outputs include manifests, model configs, rolling policy checkpoints, final
+weights, training histories, resumable per-episode rollout files, both combined
+trajectory datasets, and a final `summary.json`.
 
 After a Colab disconnect, reconnect with the same `DRIVE_RUN_DIR`, board export,
 seed, and data-generation counts. Rerunning `train-sequence` reuses completed
 datasets and rollout episodes and restores model plus optimizer state from the
 latest epoch checkpoint. Only an epoch interrupted before its checkpoint is
 repeated.
+
+Runs created before simulator-scored battle leaves were introduced are not
+resume-compatible with this search target. Preserve those artifacts and choose
+a fresh run directory; subsequent interruptions of the new run resume normally.
 
 Keras optimizer slots are built before checkpoint restoration so model tensors
 tracked through Keras 3 optimizers are matched immediately. Each newly completed
@@ -356,8 +327,9 @@ cells. The notebook:
 7. writes every checkpoint and dataset to Drive.
 
 For T4 runs, start with batch size 64–128. `TensorFlowEvaluator.evaluate_many`
-can evaluate 64–256 independent leaves per model call, although adaptive MCTS
-tree traversal and Python simulation will usually be the throughput bottleneck.
+evaluates the simulated next-turn states for one battle leaf together. Native
+battle simulation and adaptive MCTS tree traversal will usually be the
+throughput bottlenecks.
 
 ## Model contract
 
@@ -370,7 +342,9 @@ The policy/value transformer encodes 13 entities:
 It scores simulator-generated legal actions represented by
 `(kind, source, target, reorder permutation)` and produces legal-action logits,
 run value, next-battle W/D/L, and expected final wins. Illegal actions never
-enter the softmax. `BattleModel` compares two encoded teams and predicts W/D/L.
+enter the softmax. The optional standalone `BattleModel` commands remain
+available for offline W/D/L experiments, but the recommended notebook and
+`train-sequence` path do not train or consume that network.
 
 ## Verification
 
