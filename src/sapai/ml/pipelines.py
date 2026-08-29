@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import random
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,12 +15,14 @@ from typing import Any
 from sapai.data.datasets import read_battle_examples
 from sapai.ml.encoding import encode_states
 from sapai.ml.models import (
+    MODEL_SCHEMA_VERSION,
     BattleModel,
     ModelConfig,
     PolicyValueModel,
     PolicyValueTrainer,
 )
 from sapai.ml.training import BattleTrainer, encode_battle_examples
+from sapai.rewards import POLICY_TARGET_SCHEMA, VALUE_OBJECTIVE
 from sapai.training.arena import ArenaDecision, read_arena_decisions
 
 ProgressCallback = Callable[[str, Mapping[str, object]], None]
@@ -31,6 +36,10 @@ class TrainingConfig:
     weight_decay: float = 1e-4
     seed: int = 0
     max_actions: int = 256
+    deterministic: bool = True
+    warmup_epochs: int = 1
+    cosine_decay_epochs: int = 10
+    minimum_learning_rate: float = 3e-5
 
 
 def _tensorflow():
@@ -52,21 +61,92 @@ def _tensor_dict(tf, values: dict[str, object]) -> dict[str, object]:
     return {key: tf.convert_to_tensor(value) for key, value in values.items()}
 
 
+def _epoch_learning_rate(training: TrainingConfig, epoch: int) -> float:
+    if training.warmup_epochs > 0 and epoch < training.warmup_epochs:
+        return training.learning_rate * (epoch + 1) / training.warmup_epochs
+    decay_epochs = max(1, training.cosine_decay_epochs)
+    phase = (epoch - training.warmup_epochs) % decay_epochs
+    cosine = 0.5 * (1.0 + math.cos(math.pi * phase / decay_epochs))
+    return training.minimum_learning_rate + (
+        training.learning_rate - training.minimum_learning_rate
+    ) * cosine
+
+
 def _write_run_metadata(
     output: Path,
     *,
     kind: str,
     training: TrainingConfig,
     model: ModelConfig,
+    dataset_paths: list[Path],
 ) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    (output / "config.json").write_text(
-        json.dumps(
-            {"kind": kind, "training": asdict(training), "model": asdict(model)},
-            indent=2,
-        ),
-        encoding="utf-8",
+    training_values = asdict(training)
+    immutable = {
+        "format": "sapai-model-run-v2",
+        "kind": kind,
+        "model_schema": MODEL_SCHEMA_VERSION,
+        "target_schema": POLICY_TARGET_SCHEMA if kind == "policy-value" else None,
+        "objective": VALUE_OBJECTIVE if kind == "policy-value" else "battle-wdl",
+        "model": asdict(model),
+        "training_contract": {
+            key: value for key, value in training_values.items() if key != "epochs"
+        },
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+    manifest_path = output / "run-manifest.json"
+    if manifest_path.exists():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        existing_immutable = {
+            key: existing.get(key)
+            for key in immutable
+        }
+        if existing_immutable != immutable:
+            raise ValueError(
+                f"model/checkpoint contract changed in {output}; use a new output directory"
+            )
+        manifest = existing
+    else:
+        if (output / "checkpoints").exists() or (output / "config.json").exists():
+            raise ValueError(
+                f"legacy unversioned checkpoints found in {output}; use a new v2 output directory"
+            )
+        manifest = {**immutable, "datasets": []}
+    datasets = manifest.setdefault("datasets", [])
+    for path in dataset_paths:
+        entry = {
+            "path": str(path.resolve()),
+            "sha256": _file_sha256(path),
+            "target_epochs": training.epochs,
+        }
+        if entry not in datasets:
+            datasets.append(entry)
+    _atomic_write_json(manifest_path, manifest)
+    _atomic_write_json(
+        output / "config.json",
+        {"kind": kind, "training": training_values, "model": asdict(model)},
     )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _save_final_weights(model, destination: Path) -> None:
+    temporary = destination.with_name(destination.stem + ".tmp.weights.h5")
+    model.save_weights(temporary)
+    temporary.replace(destination)
 
 
 def _epoch_weights_path(output: Path, epoch: int) -> Path:
@@ -140,6 +220,8 @@ def train_battle_model(
     tf = _tensorflow()
     training = training_config or TrainingConfig()
     model_settings = model_config or ModelConfig(num_layers=3)
+    if training.deterministic:
+        tf.config.experimental.enable_op_determinism()
     tf.keras.utils.set_random_seed(training.seed)
     train = read_battle_examples(Path(dataset_dir) / "train.jsonl")
     validation_path = Path(dataset_dir) / "validation.jsonl"
@@ -153,6 +235,7 @@ def train_battle_model(
         kind="battle",
         training=training,
         model=model_settings,
+        dataset_paths=[Path(dataset_dir) / "train.jsonl"],
     )
     model = BattleModel(model_settings)
     optimizer = tf.keras.optimizers.AdamW(
@@ -180,12 +263,13 @@ def train_battle_model(
         output=output,
         resume=resume,
     )
+    compiled_train_step = tf.function(trainer.train_step, reduce_retracing=True)
     if progress is not None:
         progress(
             "training_started",
             {
                 "completed": restored_epoch,
-                "total": training.epochs,
+                "total": max(training.epochs, restored_epoch),
                 "train_examples": len(train),
                 "validation_examples": len(validation),
                 "batches_per_epoch": (
@@ -196,18 +280,22 @@ def train_battle_model(
             },
         )
 
-    rng = random.Random(training.seed + int(completed_epochs.numpy()))
     history = _read_history(output)
     for epoch in range(int(completed_epochs.numpy()), training.epochs):
+        epoch_seed = training.seed + epoch * 1_000_003
+        tf.keras.utils.set_random_seed(epoch_seed)
+        rng = random.Random(epoch_seed)
+        learning_rate = _epoch_learning_rate(training, epoch)
+        optimizer.learning_rate.assign(learning_rate)
         metrics: list[dict[str, float]] = []
         for batch in _batches(train, training.batch_size, rng):
             inputs, targets = encode_battle_examples(batch)
-            values = trainer.train_step(
+            values = compiled_train_step(
                 _tensor_dict(tf, inputs),
                 tf.convert_to_tensor(targets),
             )
             metrics.append({key: float(value.numpy()) for key, value in values.items()})
-        row = {"epoch": epoch + 1, **_mean_metrics(metrics)}
+        row = {"epoch": epoch + 1, "learning_rate": learning_rate, **_mean_metrics(metrics)}
         if validation:
             row.update(_evaluate_battle(tf, model, validation, training.batch_size))
         history.append(row)
@@ -225,7 +313,7 @@ def train_battle_model(
                     "checkpoint": manager.latest_checkpoint,
                 },
             )
-    model.save_weights(output / "battle.weights.h5")
+    _save_final_weights(model, output / "battle.weights.h5")
     return {
         "epochs": int(completed_epochs.numpy()),
         "restored_from_epoch": restored_epoch,
@@ -290,9 +378,11 @@ def _policy_batch(tf, decisions: list[ArenaDecision], max_actions: int):
     targets = {
         "search_policy": policy,
         "run_value": np.asarray([decision.run_value for decision in decisions], np.float32),
-        "next_battle": np.asarray([decision.next_battle for decision in decisions], np.float32),
-        "expected_wins": np.asarray(
-            [decision.expected_wins for decision in decisions], np.float32
+        "next_battle_after_policy": np.asarray(
+            [decision.next_battle_after_policy for decision in decisions], np.float32
+        ),
+        "expected_trophies": np.asarray(
+            [decision.expected_trophies for decision in decisions], np.float32
         ),
     }
     return _tensor_dict(tf, encoded.as_dict()), _tensor_dict(tf, targets)
@@ -311,6 +401,8 @@ def train_policy_model(
     tf = _tensorflow()
     training = training_config or TrainingConfig()
     model_settings = model_config or ModelConfig()
+    if training.deterministic:
+        tf.config.experimental.enable_op_determinism()
     tf.keras.utils.set_random_seed(training.seed)
     train = read_arena_decisions(dataset_path)
     validation = read_arena_decisions(validation_path) if validation_path else []
@@ -323,6 +415,8 @@ def train_policy_model(
         kind="policy-value",
         training=training,
         model=model_settings,
+        dataset_paths=[Path(dataset_path)]
+        + ([Path(validation_path)] if validation_path else []),
     )
     model = PolicyValueModel(model_settings)
     optimizer = tf.keras.optimizers.AdamW(
@@ -350,12 +444,13 @@ def train_policy_model(
         output=output,
         resume=resume,
     )
+    compiled_train_step = tf.function(trainer.train_step, reduce_retracing=True)
     if progress is not None:
         progress(
             "training_started",
             {
                 "completed": restored_epoch,
-                "total": training.epochs,
+                "total": max(training.epochs, restored_epoch),
                 "train_examples": len(train),
                 "validation_examples": len(validation),
                 "batches_per_epoch": (
@@ -366,15 +461,19 @@ def train_policy_model(
             },
         )
 
-    rng = random.Random(training.seed + int(completed_epochs.numpy()))
     history = _read_history(output)
     for epoch in range(int(completed_epochs.numpy()), training.epochs):
+        epoch_seed = training.seed + epoch * 1_000_003
+        tf.keras.utils.set_random_seed(epoch_seed)
+        rng = random.Random(epoch_seed)
+        learning_rate = _epoch_learning_rate(training, epoch)
+        optimizer.learning_rate.assign(learning_rate)
         metrics: list[dict[str, float]] = []
         for batch in _batches(train, training.batch_size, rng):
             inputs, targets = _policy_batch(tf, batch, training.max_actions)
-            values = trainer.train_step(inputs, targets)
+            values = compiled_train_step(inputs, targets)
             metrics.append({key: float(value.numpy()) for key, value in values.items()})
-        row = {"epoch": epoch + 1, **_mean_metrics(metrics)}
+        row = {"epoch": epoch + 1, "learning_rate": learning_rate, **_mean_metrics(metrics)}
         if validation:
             row.update(
                 _evaluate_policy(
@@ -400,7 +499,7 @@ def train_policy_model(
                     "checkpoint": manager.latest_checkpoint,
                 },
             )
-    model.save_weights(output / "policy.weights.h5")
+    _save_final_weights(model, output / "policy.weights.h5")
     return {
         "epochs": int(completed_epochs.numpy()),
         "restored_from_epoch": restored_epoch,
@@ -414,7 +513,7 @@ def train_policy_model(
 
 
 def _evaluate_policy(tf, model, examples, batch_size: int, max_actions: int):
-    values = []
+    rows: list[dict[str, float]] = []
     for start in range(0, len(examples), batch_size):
         inputs, targets = _policy_batch(tf, examples[start : start + batch_size], max_actions)
         outputs = model(inputs, training=False)
@@ -426,8 +525,60 @@ def _evaluate_policy(tf, model, examples, batch_size: int, max_actions: int):
         value_loss = tf.reduce_mean(
             tf.keras.losses.huber(targets["run_value"], outputs["value"])
         )
-        values.append(float((policy_loss + value_loss).numpy()))
-    return {"validation_loss": sum(values) / len(values)}
+        battle_loss = tf.reduce_mean(
+            tf.keras.losses.categorical_crossentropy(
+                targets["next_battle_after_policy"],
+                outputs["next_battle_after_policy"],
+            )
+        )
+        trophy_loss = tf.reduce_mean(
+            tf.keras.losses.huber(
+                targets["expected_trophies"], outputs["expected_trophies"]
+            )
+        )
+        rows.append(
+            {
+                "validation_policy_loss": float(policy_loss.numpy()),
+                "validation_policy_accuracy": float(
+                    tf.reduce_mean(
+                        tf.cast(
+                            tf.equal(
+                                tf.argmax(targets["search_policy"], axis=-1),
+                                tf.argmax(outputs["policy_logits"], axis=-1),
+                            ),
+                            tf.float32,
+                        )
+                    ).numpy()
+                ),
+                "validation_value_loss": float(value_loss.numpy()),
+                "validation_value_brier": float(
+                    tf.reduce_mean(
+                        tf.square(targets["run_value"] - outputs["value"])
+                    ).numpy()
+                ),
+                "validation_battle_loss": float(battle_loss.numpy()),
+                "validation_battle_accuracy": float(
+                    tf.reduce_mean(
+                        tf.cast(
+                            tf.equal(
+                                tf.argmax(targets["next_battle_after_policy"], axis=-1),
+                                tf.argmax(outputs["next_battle_after_policy"], axis=-1),
+                            ),
+                            tf.float32,
+                        )
+                    ).numpy()
+                ),
+                "validation_trophy_loss": float(trophy_loss.numpy()),
+                "validation_trophy_mae": float(
+                    tf.reduce_mean(
+                        tf.abs(
+                            targets["expected_trophies"] - outputs["expected_trophies"]
+                        )
+                    ).numpy()
+                ),
+            }
+        )
+    return _mean_metrics(rows)
 
 
 def _mean_metrics(rows: list[dict[str, float]]) -> dict[str, float]:
@@ -445,4 +596,4 @@ def _read_history(output: Path) -> list[dict[str, float]]:
 
 
 def _save_history(output: Path, history: list[dict[str, float]]) -> None:
-    (output / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+    _atomic_write_json(output / "history.json", history)

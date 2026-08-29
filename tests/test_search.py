@@ -4,9 +4,10 @@ import unittest
 from sapai.data.replay import BoardSnapshot
 from sapai.search.stochastic import PolicyGuidedSearch, SearchConfig, UniformEvaluator
 from sapai.sim.actions import Action, ActionKind
-from sapai.sim.battle import BattleSimulator
+from sapai.sim.battle import BattleResult, BattleResultKind, BattleSimulator
 from sapai.sim.models import RunState, Shop, ShopPet, Team
 from sapai.sim.shop import ShopEnvironment
+from sapai.training.arena import RandomPolicy
 from sapai.training.population import OpponentPopulation, SimulatorPopulationEvaluator
 from tests.helpers import catalog
 
@@ -42,6 +43,18 @@ class FixedBattleEvaluator:
         return self.value
 
 
+class AdaptiveBattleEvaluator:
+    def __init__(self):
+        self.requested = []
+
+    def begin_search(self, state, rng):
+        self.requested = []
+
+    def evaluate_battle(self, state, rng, *, simulations=None):
+        self.requested.append(simulations)
+        return 0.5
+
+
 class TrophyValueEvaluator:
     def __init__(self):
         self.batch_sizes = []
@@ -55,6 +68,111 @@ class TrophyValueEvaluator:
 
 
 class SearchTest(unittest.TestCase):
+    def test_candidate_budget_reserves_one_action_per_kind(self):
+        environment = ShopEnvironment(catalog())
+        state = environment.reset(seed=5)
+        state.team = Team.from_pets(
+            [catalog().pet_by_name("Ant").create(), catalog().pet_by_name("Fish").create()]
+        )
+        actions = environment.legal_actions(state)
+        kinds = {action.kind for action in actions}
+        search = PolicyGuidedSearch(
+            environment,
+            UniformEvaluator(),
+            SearchConfig(
+                simulations=1,
+                candidate_actions=len(kinds),
+                max_depth=1,
+                gumbel_scale=0.0,
+            ),
+        )
+
+        search.search(state, seed=3)
+
+        root = search.transpositions[state.canonical_key()]
+        self.assertEqual({action.kind for action in root.edges}, kinds)
+
+    def test_random_bootstrap_policy_can_cover_every_legal_action_kind(self):
+        actions = [Action(kind) for kind in ActionKind]
+        policy = RandomPolicy()
+        state = RunState(gold=10)
+        selected = {
+            policy.choose(state, actions, random.Random(seed)).action.kind
+            for seed in range(1000)
+        }
+        self.assertEqual(selected, set(ActionKind))
+
+    def test_battle_leaf_resampling_grows_only_at_visit_thresholds(self):
+        environment = ShopEnvironment(catalog())
+        state = RunState(team=Team(), shop=Shop(), gold=0)
+        evaluator = AdaptiveBattleEvaluator()
+        search = PolicyGuidedSearch(
+            environment,
+            UniformEvaluator(),
+            SearchConfig(
+                simulations=8,
+                candidate_actions=1,
+                max_depth=2,
+                battle_initial_simulations=4,
+                battle_max_simulations=16,
+            ),
+            battle_evaluator=evaluator,
+        )
+
+        search.search(state, seed=9)
+
+        self.assertEqual(evaluator.requested, [4, 8, 16])
+
+    def test_simulator_evaluator_reuses_common_opponents_and_seeds(self):
+        current_catalog = catalog()
+        boards = []
+        for index in range(4):
+            opponent = current_catalog.pet_by_name("Fish").create()
+            opponent.attack = index + 1
+            boards.append(
+                BoardSnapshot(
+                    f"opponent-{index}",
+                    "opponent",
+                    1,
+                    "Turtle",
+                    Team.from_pets([opponent]),
+                    version="test",
+                )
+            )
+
+        class TrackingSimulator:
+            def __init__(self):
+                self.calls = []
+
+            def simulate(self, player, opponent, *, seed, record_trace):
+                self.calls.append((opponent.slots[0].attack, seed, record_trace))
+                return BattleResult(
+                    BattleResultKind.DRAW,
+                    0,
+                    player.clone(),
+                    opponent.clone(),
+                )
+
+        simulator = TrackingSimulator()
+        evaluator = SimulatorPopulationEvaluator(
+            ShopEnvironment(current_catalog),
+            simulator,
+            OpponentPopulation(boards),
+            simulations=4,
+        )
+        root = RunState(turn=1, pack="Turtle", version="test")
+        evaluator.begin_search(root, random.Random(12))
+        first = root.clone()
+        first.awaiting_battle = True
+        second = first.clone()
+        second.team = Team.from_pets([current_catalog.pet_by_name("Ant").create()])
+
+        evaluator.evaluate_battle(first, random.Random(1), simulations=3)
+        evaluator.evaluate_battle(second, random.Random(999), simulations=3)
+
+        self.assertEqual(simulator.calls[:3], simulator.calls[3:])
+        self.assertTrue(all(not call[2] for call in simulator.calls))
+
     def test_small_budget_search_returns_legal_action(self):
         environment = ShopEnvironment(catalog())
         state = environment.reset(seed=5)
@@ -196,7 +314,7 @@ class SearchTest(unittest.TestCase):
         self.assertAlmostEqual(value, 0.1)
         self.assertEqual(continuation.batch_sizes, [4])
 
-    def test_simulator_battle_evaluator_uses_model_free_wdl_score(self):
+    def test_simulator_battle_evaluator_uses_neutral_nonterminal_prior(self):
         current_catalog = catalog()
         player = current_catalog.pet_by_name("Fish").create()
         player.attack = 50
@@ -230,7 +348,7 @@ class SearchTest(unittest.TestCase):
             awaiting_battle=True,
         )
 
-        self.assertEqual(evaluator.evaluate_battle(state, random.Random(4)), 1.0)
+        self.assertEqual(evaluator.evaluate_battle(state, random.Random(4)), 0.5)
 
 
 if __name__ == "__main__":

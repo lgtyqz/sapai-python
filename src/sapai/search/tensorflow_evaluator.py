@@ -9,8 +9,16 @@ class TensorFlowEvaluator:
     """Adapter from ``PolicyValueModel`` to the search ``Evaluator`` protocol."""
 
     def __init__(self, model, *, max_actions: int = 256):
+        try:
+            import tensorflow as tf
+        except ModuleNotFoundError as error:  # pragma: no cover
+            raise RuntimeError("install the 'ml' extra to evaluate TensorFlow models") from error
         self.model = model
         self.max_actions = max_actions
+        self._predict = tf.function(
+            lambda inputs: self.model(inputs, training=False),
+            reduce_retracing=True,
+        )
 
     def evaluate(self, state: RunState, actions: list[Action]) -> tuple[list[float], float]:
         results = self.evaluate_many([state], [actions])
@@ -31,7 +39,7 @@ class TensorFlowEvaluator:
             raise ValueError("states and actions must have equal length")
         encoded = encode_states(states, actions, max_actions=self.max_actions)
         inputs = {key: tf.convert_to_tensor(value) for key, value in encoded.as_dict().items()}
-        outputs = self.model(inputs, training=False)
+        outputs = self._predict(inputs)
         results = []
         for index, legal in enumerate(actions):
             probabilities = tf.nn.softmax(

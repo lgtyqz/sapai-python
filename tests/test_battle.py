@@ -17,6 +17,47 @@ class BattleSimulatorTest(unittest.TestCase):
         self.assertEqual(result.outcome, BattleResultKind.PLAYER_WIN)
         self.assertEqual(result.rounds, 1)
 
+    def test_trace_free_simulation_keeps_result_without_timeline_artifacts(self):
+        player = Team.from_pets([Pet(1, "Big", 1, 10, 10)])
+        opponent = Team.from_pets([Pet(2, "Small", 1, 1, 1)])
+
+        result = self.simulator.simulate(
+            player,
+            opponent,
+            seed=1,
+            record_trace=False,
+        )
+
+        self.assertEqual(result.outcome, BattleResultKind.PLAYER_WIN)
+        self.assertEqual(result.log, [])
+        self.assertEqual(result.frames, [])
+
+    def test_clash_frame_marks_both_front_pets_as_equal_participants(self):
+        player = Team.from_pets([Pet(1, "Left", 1, 3, 10)])
+        opponent = Team.from_pets([Pet(2, "Right", 1, 4, 10)])
+
+        result = self.simulator.simulate(player, opponent, seed=1)
+
+        clash = next(frame for frame in result.frames if frame.event == "clash")
+        expected = {
+            clash.player.slots[0].metadata["battle_visual_id"],
+            clash.opponent.slots[0].metadata["battle_visual_id"],
+        }
+        self.assertEqual(set(clash.participant_ids), expected)
+        self.assertFalse(hasattr(clash, "actor_id"))
+        self.assertFalse(hasattr(clash, "target_id"))
+
+    def test_swapping_teams_only_swaps_the_clash_outcome(self):
+        strong = Team.from_pets([Pet(1, "Strong", 1, 10, 20)])
+        weak = Team.from_pets([Pet(2, "Weak", 1, 1, 2)])
+
+        forward = self.simulator.simulate(strong, weak, seed=3)
+        reverse = self.simulator.simulate(weak, strong, seed=3)
+
+        self.assertEqual(forward.outcome, BattleResultKind.PLAYER_WIN)
+        self.assertEqual(reverse.outcome, BattleResultKind.OPPONENT_WIN)
+        self.assertEqual(forward.rounds, reverse.rounds)
+
     def test_ant_faint_buffs_friend(self):
         ant = self.catalog.pet_by_name("Ant").create()
         ant.health = 1
@@ -47,9 +88,9 @@ class BattleSimulatorTest(unittest.TestCase):
         result = self.simulator.simulate(
             Team.from_pets([mosquito, parrot]), Team.from_pets(enemies), seed=5
         )
-        first_attack = next(index for index, line in enumerate(result.log) if " attacks " in line)
-        pre_attack_damage = [line for line in result.log[:first_attack] if "takes 1" in line]
-        self.assertEqual(len(pre_attack_damage), 3)
+        first_clash = next(index for index, line in enumerate(result.log) if " clash" in line)
+        pre_clash_damage = [line for line in result.log[:first_clash] if "takes 1" in line]
+        self.assertEqual(len(pre_clash_damage), 3)
 
     def test_whale_activates_swallowed_deer_faint_ability(self):
         deer = self.catalog.pet_by_name("Deer").create()
@@ -74,7 +115,7 @@ class BattleSimulatorTest(unittest.TestCase):
         self.assertEqual(swallowed.label, "Whale swallows Deer")
         self.assertEqual([pet.name for pet in swallowed.player.living()], ["Bus", "Whale"])
 
-    def test_defending_boar_triggers_before_attack(self):
+    def test_boar_triggers_before_a_symmetric_clash(self):
         boar = self.catalog.pet_by_name("Boar").create()
         attacker = Pet(20, "Attacker", 1, 1, 200)
         reserve = Pet(21, "Reserve", 1, 1, 200)
@@ -85,10 +126,10 @@ class BattleSimulatorTest(unittest.TestCase):
             seed=1,
         )
 
-        first_attack = next(line for line in result.log if "Attacker takes" in line)
-        self.assertIn(f"Attacker takes {boar.attack + 4}", first_attack)
+        clash_damage = next(line for line in result.log if "Attacker takes" in line)
+        self.assertIn(f"Attacker takes {boar.attack + 4}", clash_damage)
 
-    def test_defending_elephant_triggers_after_attack(self):
+    def test_elephant_triggers_after_a_symmetric_clash(self):
         elephant = self.catalog.pet_by_name("Elephant").create()
         elephant.experience = 5
         elephant.health = 100
@@ -107,13 +148,13 @@ class BattleSimulatorTest(unittest.TestCase):
             seed=1,
         )
 
-        second_attack = next(
-            index for index, line in enumerate(result.log[1:], start=1) if " attacks " in line
+        second_clash = next(
+            index for index, line in enumerate(result.log[1:], start=1) if " clash" in line
         )
-        first_attack_log = result.log[:second_attack]
-        self.assertEqual(sum("takes 6" in line for line in first_attack_log), 3)
+        first_clash_log = result.log[:second_clash]
+        self.assertEqual(sum("takes 6" in line for line in first_clash_log), 3)
 
-    def test_defending_hippo_triggers_knockout_from_retaliation(self):
+    def test_hippo_triggers_knockout_from_either_clash_side(self):
         hippo = self.catalog.pet_by_name("Hippo").create()
         hippo.attack = 10
         hippo.health = 100
@@ -266,11 +307,11 @@ class BattleSimulatorTest(unittest.TestCase):
             seed=1,
         )
 
-        next_attack = next(
-            index for index, line in enumerate(result.log[1:], start=1) if " attacks " in line
+        next_clash = next(
+            index for index, line in enumerate(result.log[1:], start=1) if " clash" in line
         )
-        first_attack_log = result.log[:next_attack]
-        self.assertEqual(sum("Tank takes 6" in line for line in first_attack_log), 3)
+        first_clash_log = result.log[:next_clash]
+        self.assertEqual(sum("Tank takes 6" in line for line in first_clash_log), 3)
 
     def test_fly_does_not_trigger_when_zombie_fly_faints(self):
         zombie_fly = self.catalog.pet_by_name("Zombie Fly").create()

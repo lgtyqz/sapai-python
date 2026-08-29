@@ -102,10 +102,8 @@ def _animated_team(
             "perkChanged": previous_pet is not None and pet.perk != previous_pet.perk,
             "previousPerk": previous_pet.perk if previous_pet else None,
             "role": (
-                "attacker"
-                if frame.event == "attack" and visual_id == frame.actor_id
-                else "target"
-                if frame.event == "attack" and visual_id == frame.target_id
+                "interactor"
+                if frame.event == "clash" and visual_id in frame.participant_ids
                 else None
             ),
         }

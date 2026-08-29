@@ -13,6 +13,7 @@ from sapai.ml.encoding import encode_states, encode_teams
 from sapai.ml.models import BattleModel, ModelConfig, PolicyValueModel, PolicyValueTrainer
 from sapai.ml.pipelines import _restore_training_checkpoint
 from sapai.ml.training import BattleTrainer
+from sapai.sim.actions import ActionKind
 from sapai.sim.models import Team
 from sapai.sim.shop import ShopEnvironment
 from tests.helpers import catalog
@@ -33,16 +34,49 @@ class TensorFlowModelTest(unittest.TestCase):
         outputs = model(inputs)
         self.assertEqual(tuple(outputs["policy_logits"].shape), (1, 256))
         self.assertEqual(tuple(outputs["value"].shape), (1,))
+        self.assertTrue(0.0 <= float(outputs["value"][0].numpy()) <= 1.0)
+        self.assertIn("next_battle_after_policy", outputs)
+        self.assertIn("expected_trophies", outputs)
         policy = np.zeros((1, 256), dtype=np.float32)
         policy[0, 0] = 1.0
         targets = {
             "search_policy": policy,
             "run_value": np.array([0.5], dtype=np.float32),
-            "next_battle": np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
-            "expected_wins": np.array([4.0], dtype=np.float32),
+            "next_battle_after_policy": np.array([[1.0, 0.0, 0.0]], dtype=np.float32),
+            "expected_trophies": np.array([0.4], dtype=np.float32),
         }
         losses = PolicyValueTrainer(model).train_step(inputs, targets)
         self.assertTrue(float(losses["loss"].numpy()) > 0)
+
+    def test_actions_gather_their_actual_source_target_and_order_entities(self):
+        self.state.team = Team.from_pets(
+            [catalog().pet_by_name("Ant").create(), catalog().pet_by_name("Fish").create()]
+        )
+        actions = self.environment.legal_actions(self.state)
+        encoded = encode_states([self.state], [actions])
+        buy = next(action for action in actions if action.kind is ActionKind.BUY_PET)
+        food = next(
+            action
+            for action in actions
+            if action.kind is ActionKind.BUY_FOOD and action.target >= 0
+        )
+        sell = next(action for action in actions if action.kind is ActionKind.SELL_PET)
+        reorder = next(action for action in actions if action.kind is ActionKind.REORDER)
+        indexes = {action: actions.index(action) for action in (buy, food, sell, reorder)}
+
+        self.assertEqual(
+            encoded.action_source_entities[0, indexes[buy]], 5 + buy.source
+        )
+        self.assertEqual(encoded.action_target_entities[0, indexes[buy]], buy.target)
+        self.assertEqual(
+            encoded.action_source_entities[0, indexes[food]], 10 + food.source
+        )
+        self.assertEqual(encoded.action_target_entities[0, indexes[food]], food.target)
+        self.assertEqual(encoded.action_source_entities[0, indexes[sell]], sell.source)
+        self.assertEqual(
+            tuple(encoded.action_order_entities[0, indexes[reorder], : len(reorder.order)]),
+            reorder.order,
+        )
 
     def test_battle_model_forward(self):
         ant = catalog().pet_by_name("Ant").create()

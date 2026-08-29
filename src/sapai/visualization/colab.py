@@ -150,9 +150,22 @@ def _battle_result_from_dict(value: dict[str, Any]) -> BattleResult:
             player=team_from_dict(frame["player"]),
             opponent=team_from_dict(frame["opponent"]),
             log_index=int(frame["log_index"]),
-            event=str(frame.get("event", "state")),
-            actor_id=(int(frame["actor_id"]) if frame.get("actor_id") is not None else None),
-            target_id=(int(frame["target_id"]) if frame.get("target_id") is not None else None),
+            event=(
+                "clash"
+                if frame.get("event") == "attack"
+                else str(frame.get("event", "state"))
+            ),
+            participant_ids=tuple(
+                int(item)
+                for item in (
+                    frame.get("participant_ids")
+                    or [
+                        value
+                        for value in (frame.get("actor_id"), frame.get("target_id"))
+                        if value is not None
+                    ]
+                )
+            ),
         )
         for frame in value.get("frames", [])
     ]

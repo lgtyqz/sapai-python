@@ -7,6 +7,8 @@ try:  # TensorFlow is optional for simulator-only installations.
 except ModuleNotFoundError:  # pragma: no cover - exercised without ML extra
     tf = None
 
+MODEL_SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
@@ -110,14 +112,34 @@ if tf is not None:
             self.value = tf.keras.Sequential(
                 [
                     tf.keras.layers.Dense(config.d_model, activation="gelu"),
-                    tf.keras.layers.Dense(1, activation="tanh"),
+                    tf.keras.layers.Dense(1, activation="sigmoid"),
                 ]
             )
-            self.next_battle = tf.keras.layers.Dense(3, activation="softmax")
-            self.expected_wins = tf.keras.layers.Dense(1, activation="softplus")
+            self.next_battle_after_policy = tf.keras.layers.Dense(3, activation="softmax")
+            self.expected_trophies = tf.keras.layers.Dense(1, activation="sigmoid")
 
         def call(self, inputs, training=False):
-            _, state = self.encoder(inputs, training=training)
+            entities, state = self.encoder(inputs, training=training)
+            source_entities = tf.gather(
+                entities,
+                inputs["action_source_entities"],
+                batch_dims=1,
+            )
+            target_entities = tf.gather(
+                entities,
+                inputs["action_target_entities"],
+                batch_dims=1,
+            )
+            order_entities = tf.gather(
+                entities,
+                inputs["action_order_entities"],
+                batch_dims=1,
+            )
+            rank_weights = tf.cast(
+                tf.reshape(tf.range(1, 6), [1, 1, 5, 1]),
+                order_entities.dtype,
+            )
+            order_context = tf.reduce_sum(order_entities * rank_weights, axis=2) / 15.0
             action = tf.concat(
                 [
                     self.kind_embedding(inputs["action_kinds"]),
@@ -127,6 +149,9 @@ if tf is not None:
                         self.order_embedding(inputs["action_orders"]),
                         [tf.shape(inputs["action_orders"])[0], -1, 5 * 16],
                     ),
+                    source_entities,
+                    target_entities,
+                    order_context,
                 ],
                 axis=-1,
             )
@@ -140,8 +165,8 @@ if tf is not None:
             return {
                 "policy_logits": logits,
                 "value": self.value(state)[..., 0],
-                "next_battle": self.next_battle(state),
-                "expected_wins": self.expected_wins(state)[..., 0],
+                "next_battle_after_policy": self.next_battle_after_policy(state),
+                "expected_trophies": self.expected_trophies(state)[..., 0],
             }
 
     @tf.keras.utils.register_keras_serializable(package="sapai")
@@ -199,13 +224,16 @@ if tf is not None:
                 )
                 battle_loss = tf.reduce_mean(
                     tf.keras.losses.categorical_crossentropy(
-                        targets["next_battle"], outputs["next_battle"]
+                        targets["next_battle_after_policy"],
+                        outputs["next_battle_after_policy"],
                     )
                 )
-                wins_loss = tf.reduce_mean(
-                    tf.keras.losses.huber(targets["expected_wins"], outputs["expected_wins"])
+                trophies_loss = tf.reduce_mean(
+                    tf.keras.losses.huber(
+                        targets["expected_trophies"], outputs["expected_trophies"]
+                    )
                 )
-                total = policy_loss + value_loss + 0.25 * battle_loss + 0.1 * wins_loss
+                total = policy_loss + value_loss + 0.25 * battle_loss + 0.1 * trophies_loss
                 if self.model.losses:
                     total += tf.add_n(self.model.losses)
             gradients = tape.gradient(total, self.model.trainable_variables)
@@ -215,7 +243,7 @@ if tf is not None:
                 "policy_loss": policy_loss,
                 "value_loss": value_loss,
                 "battle_loss": battle_loss,
-                "expected_wins_loss": wins_loss,
+                "expected_trophies_loss": trophies_loss,
             }
 
 else:

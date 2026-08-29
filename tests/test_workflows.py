@@ -25,7 +25,7 @@ from sapai.training.arena import (
     read_arena_decisions,
     write_arena_decisions,
 )
-from sapai.training.population import OpponentPopulation
+from sapai.training.population import OpponentPopulation, split_opponent_populations
 from sapai.visualization.assets import SpriteAtlas
 from sapai.visualization.html import render_arena_html, render_battle_html
 from tests.helpers import DATA_PATH, catalog
@@ -223,7 +223,12 @@ class ArenaWorkflowTest(unittest.TestCase):
         self.assertTrue(run.final_state.terminal)
         self.assertEqual(len(run.turns), run.final_state.turn)
         self.assertTrue(run.decisions)
-        self.assertTrue(all(decision.expected_wins == run.final_state.trophies for decision in run.decisions))
+        self.assertTrue(
+            all(
+                decision.expected_trophies == run.final_state.trophies / 10
+                for decision in run.decisions
+            )
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             decision_path = root / "arena.jsonl"
@@ -247,6 +252,41 @@ class ArenaWorkflowTest(unittest.TestCase):
         self.assertIn("function experienceLabel(pet)", runtime)
         self.assertTrue(pet_assets_created)
 
+    def test_opponent_population_split_pins_patch_and_replay_groups(self):
+        boards = []
+        ant = self.catalog.pet_by_name("Ant").create()
+        for index in range(60):
+            version = "selected" if index < 50 else "older"
+            for side in ("player", "opponent"):
+                boards.append(
+                    BoardSnapshot(
+                        f"replay-{index}",
+                        side,
+                        1 + index % 3,
+                        "Turtle",
+                        Team.from_pets([ant.clone()]),
+                        version=version,
+                    )
+                )
+
+        populations = split_opponent_populations(boards, seed=7)
+
+        self.assertEqual(populations.version, "selected")
+        replay_groups = [
+            {board.replay_id for board in getattr(populations, name).boards}
+            for name in ("train", "validation", "test")
+        ]
+        self.assertFalse(replay_groups[0] & replay_groups[1])
+        self.assertFalse(replay_groups[0] & replay_groups[2])
+        self.assertFalse(replay_groups[1] & replay_groups[2])
+        self.assertTrue(
+            all(
+                board.version == "selected"
+                for name in ("train", "validation", "test")
+                for board in getattr(populations, name).boards
+            )
+        )
+
     def test_battle_frames_and_token_sprite_mapping(self):
         cricket = self.catalog.pet_by_name("Cricket").create()
         ant = self.catalog.pet_by_name("Ant").create()
@@ -257,7 +297,7 @@ class ArenaWorkflowTest(unittest.TestCase):
         )
         events = [frame.event for frame in result.frames]
         self.assertGreaterEqual(len(result.frames), result.rounds * 3 + 2)
-        self.assertIn("attack", events)
+        self.assertIn("clash", events)
         self.assertIn("impact", events)
         self.assertIn("resolve", events)
         self.assertEqual(SpriteAtlas(ASSETS_PATH).path("pet", "Zombie Cricket").name, "CricketToken.png")
@@ -276,8 +316,10 @@ class ArenaWorkflowTest(unittest.TestCase):
         self.assertIn('src="sapai.js"', html)
         self.assertIn('id="play"', html)
         self.assertIn('"event":"impact"', html)
-        self.assertIn('"role":"attacker"', html)
-        self.assertIn("@keyframes lunge-player", stylesheet)
+        self.assertIn('"role":"interactor"', html)
+        self.assertNotIn('"role":"attacker"', html)
+        self.assertIn("@keyframes clash-player", stylesheet)
+        self.assertIn("@keyframes clash-opponent", stylesheet)
         self.assertIn('class="battlefield"', runtime)
         self.assertTrue(cricket_sprite_created)
 
@@ -293,9 +335,9 @@ class ArenaWorkflowTest(unittest.TestCase):
         class CountingRunner:
             calls = 0
 
-            def run(self, *, pack, seed):
+            def run(self, *, pack, version, seed):
                 self.calls += 1
-                return runner.run(pack=pack, seed=seed)
+                return runner.run(pack=pack, version=version, seed=seed)
 
         counting = CountingRunner()
         progress = []

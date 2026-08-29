@@ -27,8 +27,7 @@ class BattleFrame:
     opponent: Team
     log_index: int
     event: str = "state"
-    actor_id: int | None = None
-    target_id: int | None = None
+    participant_ids: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -74,6 +73,7 @@ class BattleSimulator:
         self.next_visual_id = 1
         self.team_uses: list[dict[str, int]] = [{}, {}]
         self.knockouts: list[tuple[int, Pet, Pet]] = []
+        self.record_trace = True
 
     def simulate(
         self,
@@ -81,7 +81,9 @@ class BattleSimulator:
         opponent: Team,
         *,
         seed: int | None = None,
+        record_trace: bool = True,
     ) -> BattleResult:
+        self.record_trace = record_trace
         self.rng = random.Random(seed)
         self.teams = [
             [pet.clone() for pet in player.slots if pet is not None],
@@ -111,18 +113,10 @@ class BattleSimulator:
         self._resolve_combat_events()
         self._capture("Start-of-battle abilities resolved")
 
-        if len(self.teams[0]) > len(self.teams[1]):
-            attacking_side = 0
-        elif len(self.teams[1]) > len(self.teams[0]):
-            attacking_side = 1
-        else:
-            attacking_side = self.rng.randrange(2)
-
         rounds = 0
         while self.teams[0] and self.teams[1] and rounds < self.MAX_ROUNDS:
             rounds += 1
-            self._attack(attacking_side, rounds)
-            attacking_side = 1 - attacking_side
+            self._battle_interaction(rounds)
 
         if rounds >= self.MAX_ROUNDS and self.teams[0] and self.teams[1]:
             outcome = BattleResultKind.DRAW
@@ -175,9 +169,10 @@ class BattleSimulator:
         label: str,
         *,
         event: str = "state",
-        actor: Pet | None = None,
-        target: Pet | None = None,
+        participants: tuple[Pet, ...] = (),
     ) -> None:
+        if not self.record_trace:
+            return
         self.frames.append(
             BattleFrame(
                 label=label,
@@ -185,8 +180,11 @@ class BattleSimulator:
                 opponent=Team.from_pets(pet.clone() for pet in self.teams[1]),
                 log_index=len(self.log),
                 event=event,
-                actor_id=self._visual_id(actor),
-                target_id=self._visual_id(target),
+                participant_ids=tuple(
+                    visual_id
+                    for pet in participants
+                    if (visual_id := self._visual_id(pet)) is not None
+                ),
             )
         )
 
@@ -230,77 +228,75 @@ class BattleSimulator:
             if pet in self.teams[side] and pet.alive:
                 self._execute(side, pet, "before_start_battle")
 
-    def _attack(self, side: int, round_number: int) -> None:
-        enemy_side = 1 - side
-        if not self.teams[side] or not self.teams[enemy_side]:
+    def _battle_interaction(self, round_number: int) -> None:
+        """Resolve one undirected clash between the two front pets."""
+
+        if not self.teams[0] or not self.teams[1]:
             return
-        attacker = self.teams[side][0]
-        defender = self.teams[enemy_side][0]
-        participants = ((side, attacker), (enemy_side, defender))
-        for participant_side, participant in participants:
-            self._execute(participant_side, participant, "before_attack")
-        if not attacker.alive or not defender.alive:
+        fronts = ((0, self.teams[0][0]), (1, self.teams[1][0]))
+        pets = (fronts[0][1], fronts[1][1])
+        for side, pet in fronts:
+            self._execute(side, pet, "before_attack")
+        if not all(pet.alive for pet in pets):
             self._resolve_combat_events()
             self._capture(
                 f"Round {round_number} resolved",
                 event="resolve",
-                actor=attacker,
-                target=defender,
+                participants=pets,
             )
             return
 
         self._capture(
-            f"{attacker.name} attacks {defender.name}",
-            event="attack",
-            actor=attacker,
-            target=defender,
+            f"{pets[0].name} and {pets[1].name} clash",
+            event="clash",
+            participants=pets,
         )
-        attack_damage = attacker.effective_attack + self._attack_bonus(attacker)
-        defense_damage = defender.effective_attack + self._attack_bonus(defender)
-        self.log.append(f"P{side + 1} {attacker.name} attacks P{enemy_side + 1} {defender.name}")
-        self._damage(enemy_side, defender, attack_damage, source=attacker)
-        self._damage(side, attacker, defense_damage, source=defender)
-        self._splash(enemy_side, attacker)
-        self._splash(side, defender)
+        damage = tuple(pet.effective_attack + self._clash_bonus(pet) for pet in pets)
+        if self.record_trace:
+            self.log.append(
+                f"P1 {pets[0].name} and P2 {pets[1].name} clash"
+            )
+        self._damage(1, pets[1], damage[0], source=pets[0])
+        self._damage(0, pets[0], damage[1], source=pets[1])
+        self._splash(1, pets[0])
+        self._splash(0, pets[1])
 
-        for participant_side, participant in participants:
-            self._execute(participant_side, participant, "after_attack")
-            participant_index = self._index(participant_side, participant)
-            if participant_index is not None:
-                for follower in list(self.teams[participant_side][participant_index + 1 :]):
+        for side, pet in fronts:
+            self._execute(side, pet, "after_attack")
+            pet_index = self._index(side, pet)
+            if pet_index is not None:
+                for follower in list(self.teams[side][pet_index + 1 :]):
                     self._execute(
-                        participant_side,
+                        side,
                         follower,
                         "friend_ahead_attacked",
-                        trigger_pet=participant,
+                        trigger_pet=pet,
                     )
 
         self._capture(
-            "Damage and attack abilities resolve",
+            "Clash damage and abilities resolve",
             event="impact",
-            actor=attacker,
-            target=defender,
+            participants=pets,
         )
 
         self._resolve_combat_events()
         self._capture(
             f"Round {round_number} resolved",
             event="resolve",
-            actor=attacker,
-            target=defender,
+            participants=pets,
         )
 
-    def _attack_bonus(self, pet: Pet) -> int:
+    def _clash_bonus(self, pet: Pet) -> int:
         perk = self.rules.perk_definition(pet.perk)
         bonus = int(perk.get("attack_bonus", 0))
         if perk.get("consume_on_attack"):
             pet.perk = None
         return bonus
 
-    def _splash(self, target_side: int, attacker: Pet) -> None:
-        amount = int(self.rules.perk_definition(attacker.perk).get("splash_damage", 0))
+    def _splash(self, target_side: int, source: Pet) -> None:
+        amount = int(self.rules.perk_definition(source.perk).get("splash_damage", 0))
         if amount and len(self.teams[target_side]) > 1:
-            self._damage(target_side, self.teams[target_side][1], amount, source=attacker)
+            self._damage(target_side, self.teams[target_side][1], amount, source=source)
 
     def _damage(self, side: int, target: Pet, amount: int, *, source: Pet | None) -> bool:
         if target not in self.teams[side] or amount <= 0:
@@ -326,7 +322,8 @@ class BattleSimulator:
         ):
             target.health = min(target.health, 0)
         if hurt:
-            self.log.append(f"{target.name} takes {original} ({dealt} health) damage")
+            if self.record_trace:
+                self.log.append(f"{target.name} takes {original} ({dealt} health) damage")
             self._execute(side, target, "hurt", trigger_pet=source)
             for friend in list(self.teams[side]):
                 if friend is not target:
@@ -662,15 +659,15 @@ class BattleSimulator:
                     faint_summons = self._execute(side, target, "faint")
                     self.teams[side].remove(target)
                     self._insert_summons(side, position, faint_summons)
-                    self.log.append(
-                        f"P{side + 1} {pet.name} swallows {target.name}; "
-                        f"{target.name} faint ability activates"
-                    )
+                    if self.record_trace:
+                        self.log.append(
+                            f"P{side + 1} {pet.name} swallows {target.name}; "
+                            f"{target.name} faint ability activates"
+                        )
                     self._capture(
                         f"{pet.name} swallows {target.name}",
                         event="ability",
-                        actor=pet,
-                        target=target,
+                        participants=(pet, target),
                     )
             return []
         if op == "release_swallowed":

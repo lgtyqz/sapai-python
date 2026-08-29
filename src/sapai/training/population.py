@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import json
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 from sapai.data.replay import BoardSnapshot, board_is_pack_compatible
 from sapai.data.serialization import read_boards
 from sapai.ml.encoding import encode_teams
+from sapai.rewards import arena_run_value
 from sapai.sim.battle import BattleResultKind, BattleSimulator
 from sapai.sim.catalog import Catalog
 from sapai.sim.models import BattleOutcome, RunState, Team
 from sapai.sim.shop import ShopEnvironment
-from sapai.training.rewards import arena_run_value
 
 
 def load_opponent_boards(
@@ -37,8 +38,65 @@ def load_opponent_population(
     path: str | Path,
     catalog: Catalog,
     pack: str,
+    version: str | None = None,
 ) -> OpponentPopulation:
-    return OpponentPopulation(load_opponent_boards(path, catalog, pack))
+    boards = load_opponent_boards(path, catalog, pack)
+    versions = Counter(board.version for board in boards)
+    selected_version = version or min(versions, key=lambda item: (-versions[item], item))
+    selected = [board for board in boards if board.version == selected_version]
+    if not selected:
+        raise ValueError(f"board dataset contains no boards for version {selected_version!r}")
+    return OpponentPopulation(selected)
+
+
+@dataclass(frozen=True, slots=True)
+class OpponentPopulationSplit:
+    train: OpponentPopulation
+    validation: OpponentPopulation
+    test: OpponentPopulation
+    version: str
+    board_counts: dict[str, int]
+
+
+def split_opponent_populations(
+    boards: list[BoardSnapshot],
+    *,
+    version: str | None = None,
+    validation_fraction: float = 0.1,
+    test_fraction: float = 0.1,
+    seed: int = 0,
+) -> OpponentPopulationSplit:
+    """Choose one patch and split whole replay IDs before policy training."""
+
+    if not boards:
+        raise ValueError("opponent population cannot be empty")
+    versions = Counter(board.version for board in boards)
+    selected_version = version or min(versions, key=lambda item: (-versions[item], item))
+    version_boards = [board for board in boards if board.version == selected_version]
+    if not version_boards:
+        raise ValueError(f"board dataset contains no boards for version {selected_version!r}")
+    from sapai.data.datasets import split_boards
+
+    split = split_boards(
+        version_boards,
+        validation_fraction=validation_fraction,
+        test_fraction=test_fraction,
+        seed=seed,
+    )
+    values = {name: getattr(split, name) for name in ("train", "validation", "test")}
+    empty = [name for name, items in values.items() if not items]
+    if empty:
+        raise ValueError(
+            "opponent replay split is empty for "
+            f"{', '.join(empty)}; add replay groups or reduce held-out fractions"
+        )
+    return OpponentPopulationSplit(
+        train=OpponentPopulation(values["train"]),
+        validation=OpponentPopulation(values["validation"]),
+        test=OpponentPopulation(values["test"]),
+        version=selected_version,
+        board_counts={name: len(items) for name, items in values.items()},
+    )
 
 
 class OpponentPopulation:
@@ -48,28 +106,28 @@ class OpponentPopulation:
         if not boards:
             raise ValueError("opponent population cannot be empty")
         self.boards = boards
+        self.versions = frozenset(board.version for board in boards)
         self.groups: dict[tuple[str, int, str], list[BoardSnapshot]] = defaultdict(list)
         for board in boards:
             self.groups[(board.pack, board.turn, board.version)].append(board)
 
     def candidates(self, *, pack: str, turn: int, version: str) -> list[BoardSnapshot]:
+        if version == "current" and len(self.versions) == 1:
+            version = next(iter(self.versions))
         exact = self.groups.get((pack, turn, version))
         if exact:
             return exact
-        same_patch = [
+        same_version = [
             board
             for board in self.boards
-            if board.pack == pack and board.turn == turn and board.version == version
+            if board.pack == pack and board.version == version
         ]
-        if same_patch:
-            return same_patch
-        same_turn = [
-            board for board in self.boards if board.pack == pack and board.turn == turn
-        ]
-        if same_turn:
-            return same_turn
-        same_pack = [board for board in self.boards if board.pack == pack]
-        values = same_pack or self.boards
+        if not same_version:
+            raise ValueError(
+                f"opponent population has no {pack!r} boards for version {version!r}; "
+                f"available versions: {sorted(self.versions)}"
+            )
+        values = same_version
         distance = min(abs(board.turn - turn) for board in values)
         return [board for board in values if abs(board.turn - turn) == distance]
 
@@ -152,9 +210,10 @@ class SimulatorPopulationEvaluator:
 
     When a continuation evaluator is supplied, each simulated outcome is
     applied to a cloned run state and the resulting next-turn state is valued
-    in one batch. This keeps the battle leaf on the same final-run value scale
-    as the policy/value network. Without one, conventional win/draw/loss scores
-    of 1/0.5/0 provide a model-free fallback.
+    in one batch. This keeps the battle leaf on the same final-run completion-
+    probability scale as the policy/value network. Without one, non-terminal
+    continuations use an uninformative prior of 0.5; terminal continuations are
+    still labeled exactly as 0 or 1.
     """
 
     _OUTCOMES: ClassVar[dict[BattleResultKind, BattleOutcome]] = {
@@ -162,12 +221,6 @@ class SimulatorPopulationEvaluator:
         BattleResultKind.DRAW: BattleOutcome.DRAW,
         BattleResultKind.OPPONENT_WIN: BattleOutcome.LOSS,
     }
-    _SCORES: ClassVar[dict[BattleResultKind, float]] = {
-        BattleResultKind.PLAYER_WIN: 1.0,
-        BattleResultKind.DRAW: 0.5,
-        BattleResultKind.OPPONENT_WIN: 0.0,
-    }
-
     def __init__(
         self,
         environment: ShopEnvironment,
@@ -184,43 +237,86 @@ class SimulatorPopulationEvaluator:
         self.population = population
         self.simulations = simulations
         self.continuation_evaluator = continuation_evaluator
+        self._panels: dict[
+            tuple[str, int, str], list[tuple[BoardSnapshot, int, int]]
+        ] = {}
+        self._values: dict[str, list[float]] = {}
 
-    def evaluate_battle(self, state: RunState, rng: random.Random) -> float:
+    def begin_search(self, state: RunState, rng: random.Random) -> None:
+        """Build one opponent/seed panel shared by all end-turn candidates."""
+
+        self._panels = {}
+        self._values = {}
+        self._panel(state, rng)
+
+    def _panel(
+        self,
+        state: RunState,
+        rng: random.Random,
+    ) -> list[tuple[BoardSnapshot, int, int]]:
+        key = (state.pack, state.turn, state.version)
+        existing = self._panels.get(key)
+        if existing is not None:
+            return existing
+        candidates = self.population.candidates(
+            pack=state.pack,
+            turn=state.turn,
+            version=state.version,
+        )
+        if len(candidates) >= self.simulations:
+            opponents = rng.sample(candidates, self.simulations)
+        else:
+            opponents = list(candidates)
+            rng.shuffle(opponents)
+            opponents.extend(
+                rng.choice(candidates) for _ in range(self.simulations - len(opponents))
+            )
+        panel = [
+            (opponent, rng.getrandbits(63), rng.getrandbits(64))
+            for opponent in opponents
+        ]
+        self._panels[key] = panel
+        return panel
+
+    def evaluate_battle(
+        self,
+        state: RunState,
+        rng: random.Random,
+        *,
+        simulations: int | None = None,
+    ) -> float:
         if not state.awaiting_battle:
             raise ValueError("battle evaluation requires an awaiting-battle state")
-
+        requested = min(self.simulations, simulations or self.simulations)
+        panel = self._panel(state, rng)
+        key = state.canonical_key()
+        values = self._values.setdefault(key, [])
+        new_entries = panel[len(values) : requested]
         outcomes: list[BattleResultKind] = []
-        for _ in range(self.simulations):
-            opponent = self.population.sample(
-                pack=state.pack,
-                turn=state.turn,
-                version=state.version,
-                rng=rng,
-            )
+        for opponent, battle_seed, _ in new_entries:
             outcomes.append(
                 self.simulator.simulate(
                     state.team,
                     opponent.team,
-                    seed=rng.getrandbits(63),
+                    seed=battle_seed,
+                    record_trace=False,
                 ).outcome
             )
-
-        if self.continuation_evaluator is None:
-            return sum(self._SCORES[outcome] for outcome in outcomes) / len(outcomes)
-
-        values: list[float | None] = [None] * len(outcomes)
+        new_values: list[float | None] = [None] * len(outcomes)
         continuation_indices: list[int] = []
         continuation_states: list[RunState] = []
         continuation_actions = []
         for index, outcome in enumerate(outcomes):
-            transition_rng = random.Random(rng.getrandbits(64))
+            transition_rng = random.Random(new_entries[index][2])
             next_state = self.environment.apply_outcome(
                 state,
                 self._OUTCOMES[outcome],
                 transition_rng,
             ).state
             if next_state.terminal:
-                values[index] = arena_run_value(next_state)
+                new_values[index] = arena_run_value(next_state)
+            elif self.continuation_evaluator is None:
+                new_values[index] = 0.5
             else:
                 continuation_indices.append(index)
                 continuation_states.append(next_state)
@@ -242,11 +338,12 @@ class SimulatorPopulationEvaluator:
             if len(evaluated) != len(continuation_states):
                 raise ValueError("continuation evaluator returned the wrong number of values")
             for index, (_, value) in zip(continuation_indices, evaluated, strict=True):
-                values[index] = float(value)
+                new_values[index] = float(value)
 
-        if any(value is None for value in values):  # pragma: no cover - defensive invariant
+        if any(value is None for value in new_values):  # pragma: no cover - defensive invariant
             raise RuntimeError("battle evaluation did not value every simulated outcome")
-        return sum(float(value) for value in values) / len(values)
+        values.extend(float(value) for value in new_values)
+        return sum(values[:requested]) / requested
 
 
 class BattlePopulationEvaluator:

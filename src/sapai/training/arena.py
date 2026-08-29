@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Protocol
@@ -15,13 +16,17 @@ from sapai.data.serialization import (
     run_state_to_dict,
     write_jsonl,
 )
+from sapai.rewards import (
+    POLICY_TARGET_SCHEMA,
+    arena_run_value,
+    normalized_trophies,
+)
 from sapai.search.stochastic import PolicyGuidedSearch
 from sapai.sim.actions import Action, ActionKind
 from sapai.sim.battle import BattleResult, BattleResultKind, BattleSimulator
 from sapai.sim.models import BattleOutcome, RunState
 from sapai.sim.shop import ShopEnvironment
 from sapai.training.population import OpponentPopulation
-from sapai.training.rewards import arena_run_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,29 +70,49 @@ class HeuristicPolicy:
 
 
 class RandomPolicy:
-    """A loop-safe exploratory policy for bootstrap data."""
-
-    USEFUL: ClassVar[set[ActionKind]] = {
-        ActionKind.BUY_PET,
-        ActionKind.BUY_MERGE_PET,
-        ActionKind.MERGE_BOARD_PET,
-        ActionKind.BUY_FOOD,
-        ActionKind.ROLL,
-        ActionKind.SELL_PET,
-        ActionKind.END_TURN,
-    }
+    """A loop-safe, action-kind-balanced exploratory policy."""
 
     def choose(
         self, state: RunState, actions: list[Action], rng: random.Random
     ) -> PolicyChoice:
-        choices = [action for action in actions if action.kind in self.USEFUL]
         end = next(action for action in actions if action.kind is ActionKind.END_TURN)
         if state.gold < 1 or rng.random() < 0.15:
             action = end
         else:
-            action = rng.choice(choices or [end])
+            by_kind: dict[ActionKind, list[Action]] = {}
+            for candidate in actions:
+                by_kind.setdefault(candidate.kind, []).append(candidate)
+            chosen_kind = rng.choice(list(by_kind))
+            action = rng.choice(by_kind[chosen_kind])
         probabilities = [float(candidate == action) for candidate in actions]
         return PolicyChoice(action, probabilities)
+
+
+class MixturePolicy:
+    """Use exploration on a fixed fraction of otherwise heuristic decisions."""
+
+    def __init__(
+        self,
+        primary: ArenaPolicy,
+        exploratory: ArenaPolicy,
+        *,
+        exploration_probability: float = 0.25,
+    ) -> None:
+        if not 0.0 <= exploration_probability <= 1.0:
+            raise ValueError("exploration probability must be in [0, 1]")
+        self.primary = primary
+        self.exploratory = exploratory
+        self.exploration_probability = exploration_probability
+
+    def choose(
+        self, state: RunState, actions: list[Action], rng: random.Random
+    ) -> PolicyChoice:
+        policy = (
+            self.exploratory
+            if rng.random() < self.exploration_probability
+            else self.primary
+        )
+        return policy.choose(state, actions, rng)
 
 
 class ModelPolicy:
@@ -129,9 +154,9 @@ class ArenaDecision:
     state: RunState
     actions: list[Action]
     search_policy: list[float]
-    next_battle: tuple[float, float, float] = (0.0, 1.0, 0.0)
+    next_battle_after_policy: tuple[float, float, float] = (0.0, 1.0, 0.0)
     run_value: float = 0.0
-    expected_wins: float = 0.0
+    expected_trophies: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +179,7 @@ class ArenaRunResult:
     final_state: RunState
     decisions: list[ArenaDecision]
     turns: list[ArenaTurn]
+    battle_outcomes: tuple[BattleResultKind, ...] = ()
 
 
 class ArenaRunner:
@@ -165,22 +191,41 @@ class ArenaRunner:
         policy: ArenaPolicy,
         *,
         max_decisions_per_turn: int = 30,
+        record_timeline: bool = True,
     ):
         self.environment = environment
         self.battle = battle
         self.population = population
         self.policy = policy
         self.max_decisions_per_turn = max_decisions_per_turn
+        self.record_timeline = record_timeline
 
-    def run(self, *, pack: str = "Turtle", seed: int = 0) -> ArenaRunResult:
+    def run(
+        self,
+        *,
+        pack: str = "Turtle",
+        version: str = "current",
+        seed: int = 0,
+    ) -> ArenaRunResult:
         rng = random.Random(seed)
-        state = self.environment.reset(pack=pack, seed=rng.getrandbits(63))
+        if version == "current" and len(self.population.versions) == 1:
+            version = next(iter(self.population.versions))
+        state = self.environment.reset(
+            pack=pack,
+            version=version,
+            seed=rng.getrandbits(63),
+        )
         decisions: list[ArenaDecision] = []
         turns: list[ArenaTurn] = []
+        battle_outcomes: list[BattleResultKind] = []
         while not state.terminal:
-            arena_turn = ArenaTurn(
-                state.turn,
-                [ShopFrame(f"Turn {state.turn} shop", state.clone())],
+            arena_turn = (
+                ArenaTurn(
+                    state.turn,
+                    [ShopFrame(f"Turn {state.turn} shop", state.clone())],
+                )
+                if self.record_timeline
+                else None
             )
             turn_decisions: list[ArenaDecision] = []
             for decision_index in range(self.max_decisions_per_turn):
@@ -200,9 +245,14 @@ class ArenaRunner:
                 decisions.append(decision)
                 turn_decisions.append(decision)
                 state = self.environment.step(state, choice.action, rng).state
-                arena_turn.shop_frames.append(
-                    ShopFrame(choice.action.kind.name.replace("_", " ").title(), state.clone(), choice.action)
-                )
+                if arena_turn is not None:
+                    arena_turn.shop_frames.append(
+                        ShopFrame(
+                            choice.action.kind.name.replace("_", " ").title(),
+                            state.clone(),
+                            choice.action,
+                        )
+                    )
                 if state.awaiting_battle:
                     break
             if not state.awaiting_battle:
@@ -218,21 +268,25 @@ class ArenaRunner:
                 state.team,
                 opponent.team,
                 seed=rng.getrandbits(63),
+                record_trace=self.record_timeline,
             )
-            arena_turn.opponent_replay_id = opponent.replay_id
-            arena_turn.battle = battle_result
-            turns.append(arena_turn)
+            battle_outcomes.append(battle_result.outcome)
+            if arena_turn is not None:
+                arena_turn.opponent_replay_id = opponent.replay_id
+                arena_turn.battle = battle_result
+                turns.append(arena_turn)
             outcome, target = _outcome_target(battle_result.outcome)
             for decision in turn_decisions:
-                decision.next_battle = target
+                decision.next_battle_after_policy = target
             state = self.environment.apply_outcome(state, outcome, rng).state
 
 
         run_value = arena_run_value(state)
+        trophy_target = normalized_trophies(state)
         for decision in decisions:
             decision.run_value = run_value
-            decision.expected_wins = float(state.trophies)
-        return ArenaRunResult(state.clone(), decisions, turns)
+            decision.expected_trophies = trophy_target
+        return ArenaRunResult(state.clone(), decisions, turns, tuple(battle_outcomes))
 
 
 def _outcome_target(
@@ -247,23 +301,32 @@ def _outcome_target(
 
 def decision_to_dict(decision: ArenaDecision) -> dict[str, object]:
     return {
+        "target_schema": POLICY_TARGET_SCHEMA,
         "state": run_state_to_dict(decision.state),
         "actions": [action_to_dict(action) for action in decision.actions],
         "search_policy": decision.search_policy,
-        "next_battle": list(decision.next_battle),
+        "next_battle_after_policy": list(decision.next_battle_after_policy),
         "run_value": decision.run_value,
-        "expected_wins": decision.expected_wins,
+        "expected_trophies": decision.expected_trophies,
     }
 
 
 def decision_from_dict(value: dict[str, object]) -> ArenaDecision:
+    schema = value.get("target_schema")
+    if schema != POLICY_TARGET_SCHEMA:
+        raise ValueError(
+            f"policy target schema mismatch: expected {POLICY_TARGET_SCHEMA!r}, got {schema!r}; "
+            "regenerate Arena trajectories for the completion-probability objective"
+        )
     return ArenaDecision(
         state=run_state_from_dict(value["state"]),  # type: ignore[arg-type]
         actions=[action_from_dict(action) for action in value["actions"]],  # type: ignore[arg-type]
         search_policy=[float(item) for item in value["search_policy"]],  # type: ignore[union-attr]
-        next_battle=tuple(float(item) for item in value["next_battle"]),  # type: ignore[arg-type]
+        next_battle_after_policy=tuple(  # type: ignore[arg-type]
+            float(item) for item in value["next_battle_after_policy"]
+        ),
         run_value=float(value["run_value"]),
-        expected_wins=float(value["expected_wins"]),
+        expected_trophies=float(value["expected_trophies"]),
     )
 
 
@@ -273,3 +336,45 @@ def write_arena_decisions(path: str | Path, decisions: list[ArenaDecision]) -> i
 
 def read_arena_decisions(path: str | Path) -> list[ArenaDecision]:
     return [decision_from_dict(row) for row in read_jsonl(path)]
+
+
+def evaluate_arena_policy(
+    runner: ArenaRunner,
+    *,
+    episodes: int,
+    pack: str,
+    version: str,
+    seed: int,
+) -> dict[str, object]:
+    """Evaluate a policy on a fixed episode seed schedule."""
+
+    if episodes < 1:
+        raise ValueError("Arena evaluation episodes must be positive")
+    trophies: list[int] = []
+    turns: list[int] = []
+    outcomes = {"win": 0, "draw": 0, "loss": 0}
+    for episode in range(episodes):
+        result = runner.run(pack=pack, version=version, seed=seed + episode)
+        trophies.append(result.final_state.trophies)
+        turns.append(result.final_state.turn)
+        for outcome in result.battle_outcomes:
+            if outcome is BattleResultKind.PLAYER_WIN:
+                outcomes["win"] += 1
+            elif outcome is BattleResultKind.OPPONENT_WIN:
+                outcomes["loss"] += 1
+            else:
+                outcomes["draw"] += 1
+    battles = sum(outcomes.values())
+    return {
+        "episodes": episodes,
+        "completion_rate": sum(value >= 10 for value in trophies) / episodes,
+        "mean_trophies": statistics.fmean(trophies),
+        "median_trophies": statistics.median(trophies),
+        "mean_turns": statistics.fmean(turns),
+        "battle_rates": {
+            name: count / battles if battles else 0.0 for name, count in outcomes.items()
+        },
+        "trophy_histogram": {
+            str(value): trophies.count(value) for value in sorted(set(trophies))
+        },
+    }

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sapai.data.replay import BoardSnapshot
-from sapai.data.serialization import write_boards
+from sapai.data.serialization import team_to_dict, write_boards
 from sapai.sim.battle import BattleSimulator
 from sapai.sim.models import Shop, ShopPet, Team
 from sapai.sim.shop import ShopEnvironment
@@ -19,6 +19,7 @@ from sapai.training.population import (
     load_opponent_population,
 )
 from sapai.visualization.colab import (
+    _battle_result_from_dict,
     build_human_arena_html,
     display_human_arena,
     human_arena_payload,
@@ -559,6 +560,38 @@ class HumanArenaSessionTest(unittest.TestCase):
             refreshed = callbacks[callback_name]("refresh", {})
             self.assertEqual(refreshed.data["stage"], "shop")
 
+    def test_old_directional_battle_frame_loads_as_an_undirected_clash(self):
+        left = self.catalog.pet_by_name("Ant").create()
+        right = self.catalog.pet_by_name("Fish").create()
+        left.metadata["battle_visual_id"] = 11
+        right.metadata["battle_visual_id"] = 22
+        left_team = Team.from_pets([left])
+        right_team = Team.from_pets([right])
+
+        restored = _battle_result_from_dict(
+            {
+                "outcome": "draw",
+                "rounds": 1,
+                "player": team_to_dict(left_team),
+                "opponent": team_to_dict(right_team),
+                "log": [],
+                "frames": [
+                    {
+                        "label": "legacy attack",
+                        "player": team_to_dict(left_team),
+                        "opponent": team_to_dict(right_team),
+                        "log_index": 0,
+                        "event": "attack",
+                        "actor_id": 11,
+                        "target_id": 22,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(restored.frames[0].event, "clash")
+        self.assertEqual(restored.frames[0].participant_ids, (11, 22))
+
     def test_standard_jupyter_widget_adapter_uses_only_core_widget_models(self):
         displayed = []
 
@@ -661,7 +694,8 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("RUN_HUMAN_BENCHMARK = False", config)
         self.assertIn("HUMAN_BENCHMARK_DIR", config)
         self.assertIn("if RUN_HUMAN_BENCHMARK:", launcher)
-        self.assertIn("load_opponent_population(BOARDS_FOR_RUN", launcher)
+        self.assertIn("split_opponent_populations(", launcher)
+        self.assertIn("human_population = human_populations.test", launcher)
         self.assertIn("display_human_arena", launcher)
         self.assertIn("version_on_mismatch=True", launcher)
         self.assertIn("'--progress'", source)

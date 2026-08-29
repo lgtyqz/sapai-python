@@ -44,8 +44,14 @@ class ShopEnvironment:
     def food_slots(tier: int) -> int:
         return 1 if tier < 3 else 2
 
-    def reset(self, *, pack: str = "Turtle", seed: int | None = None) -> RunState:
-        state = RunState(pack=pack)
+    def reset(
+        self,
+        *,
+        pack: str = "Turtle",
+        version: str = "current",
+        seed: int | None = None,
+    ) -> RunState:
+        state = RunState(pack=pack, version=version)
         rng = random.Random(seed)
         state.shop = self.roll_shop(state, rng)
         return state

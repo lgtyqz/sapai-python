@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sapai.sim.actions import Action
+from sapai.sim.actions import Action, ActionKind
 from sapai.sim.models import RunState, Shop, Team
 
 MAX_ENTITIES = 13  # 5 team + 5 shop pets + 2 foods + 1 global token
@@ -21,6 +21,9 @@ class EncodedBatch:
     action_sources: object
     action_targets: object
     action_orders: object
+    action_source_entities: object
+    action_target_entities: object
+    action_order_entities: object
     action_mask: object
 
     def as_dict(self) -> dict[str, object]:
@@ -65,6 +68,11 @@ def encode_states(
     sources = np.zeros((batch, max_actions), dtype=np.int32)
     targets = np.zeros((batch, max_actions), dtype=np.int32)
     orders = np.zeros((batch, max_actions, 5), dtype=np.int32)
+    source_entities = np.full((batch, max_actions), MAX_ENTITIES - 1, dtype=np.int32)
+    target_entities = np.full((batch, max_actions), MAX_ENTITIES - 1, dtype=np.int32)
+    order_entities = np.full(
+        (batch, max_actions, 5), MAX_ENTITIES - 1, dtype=np.int32
+    )
     action_mask = np.zeros((batch, max_actions), dtype=bool)
 
     for batch_index, (state, actions) in enumerate(zip(states, legal_actions, strict=True)):
@@ -128,6 +136,29 @@ def encode_states(
             targets[batch_index, action_index] = action.target + 2
             for order_index, position in enumerate(action.order[:5]):
                 orders[batch_index, action_index, order_index] = position + 1
+                order_entities[batch_index, action_index, order_index] = position
+            if action.kind in {
+                ActionKind.BUY_PET,
+                ActionKind.BUY_MERGE_PET,
+                ActionKind.FREEZE_PET,
+                ActionKind.UNFREEZE_PET,
+            }:
+                source_entities[batch_index, action_index] = 5 + action.source
+            elif action.kind in {
+                ActionKind.BUY_FOOD,
+                ActionKind.FREEZE_FOOD,
+                ActionKind.UNFREEZE_FOOD,
+            }:
+                source_entities[batch_index, action_index] = 10 + action.source
+            elif action.kind in {ActionKind.SELL_PET, ActionKind.MERGE_BOARD_PET}:
+                source_entities[batch_index, action_index] = action.source
+            if action.kind in {
+                ActionKind.BUY_PET,
+                ActionKind.BUY_MERGE_PET,
+                ActionKind.BUY_FOOD,
+                ActionKind.MERGE_BOARD_PET,
+            } and action.target >= 0:
+                target_entities[batch_index, action_index] = action.target
             action_mask[batch_index, action_index] = True
 
     return EncodedBatch(
@@ -140,6 +171,9 @@ def encode_states(
         action_sources=sources,
         action_targets=targets,
         action_orders=orders,
+        action_source_entities=source_entities,
+        action_target_entities=target_entities,
+        action_order_entities=order_entities,
         action_mask=action_mask,
     )
 

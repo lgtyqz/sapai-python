@@ -5,6 +5,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from sapai.rewards import arena_run_value
 from sapai.sim.actions import Action, ActionKind
 from sapai.sim.models import RunState
 from sapai.sim.shop import ShopEnvironment
@@ -12,29 +13,41 @@ from sapai.sim.shop import ShopEnvironment
 
 class Evaluator(Protocol):
     def evaluate(self, state: RunState, actions: list[Action]) -> tuple[list[float], float]:
-        """Return action probabilities and a run value in ``[-1, 1]``."""
+        """Return action probabilities and Arena completion probability."""
 
 
 class BattleLeafEvaluator(Protocol):
-    def evaluate_battle(self, state: RunState, rng: random.Random) -> float:
-        """Return a run value for a state waiting on its Arena battle."""
+    def begin_search(self, state: RunState, rng: random.Random) -> None:
+        """Prepare common random numbers shared by battle candidates."""
+
+    def evaluate_battle(
+        self,
+        state: RunState,
+        rng: random.Random,
+        *,
+        simulations: int | None = None,
+    ) -> float:
+        """Return Arena completion probability for a pending battle."""
 
 
 class UniformEvaluator:
     def evaluate(self, state: RunState, actions: list[Action]) -> tuple[list[float], float]:
         probability = 1.0 / max(1, len(actions))
-        return [probability] * len(actions), 0.0
+        return [probability] * len(actions), 0.5
 
 
 @dataclass(slots=True)
 class SearchConfig:
     simulations: int = 32
-    candidate_actions: int = 8
+    candidate_actions: int = 16
     max_depth: int = 15
     c_puct: float = 1.5
     progressive_widening_c: float = 1.0
     progressive_widening_alpha: float = 0.5
     gumbel_scale: float = 1.0
+    action_kind_prior_epsilon: float = 0.15
+    battle_initial_simulations: int = 4
+    battle_max_simulations: int = 16
 
 
 @dataclass(slots=True)
@@ -45,6 +58,7 @@ class Node:
     expanded: bool = False
     value_prior: float = 0.0
     edges: dict[Action, Edge] = field(default_factory=dict)
+    battle_simulations: int = 0
 
     @property
     def value(self) -> float:
@@ -91,6 +105,9 @@ class PolicyGuidedSearch:
     def search(self, state: RunState, *, seed: int | None = None) -> SearchResult:
         rng = random.Random(seed)
         self.transpositions = {}
+        begin_search = getattr(self.battle_evaluator, "begin_search", None)
+        if callable(begin_search):
+            begin_search(state, rng)
         root = self._node(state.clone())
         self._expand(root, rng, root=True)
         if not root.edges:
@@ -128,6 +145,16 @@ class PolicyGuidedSearch:
             if total
             else [1.0 / len(actions)] * len(actions)
         )
+        by_kind: dict[ActionKind, list[int]] = {}
+        for index, action in enumerate(actions):
+            by_kind.setdefault(action.kind, []).append(index)
+        kind_probability = 1.0 / len(by_kind)
+        epsilon = min(1.0, max(0.0, self.config.action_kind_prior_epsilon))
+        normalized = [
+            (1.0 - epsilon) * prior
+            + epsilon * kind_probability / len(by_kind[action.kind])
+            for action, prior in zip(actions, normalized, strict=True)
+        ]
 
         scored = []
         for action, prior in zip(actions, normalized, strict=True):
@@ -138,7 +165,21 @@ class PolicyGuidedSearch:
             scored.append((score, action, prior))
         scored.sort(key=lambda item: item[0], reverse=True)
         candidate_count = max(1, self.config.candidate_actions)
-        kept = scored[:candidate_count]
+        best_by_kind: dict[ActionKind, tuple[float, Action, float]] = {}
+        for item in scored:
+            best_by_kind.setdefault(item[1].kind, item)
+        kept = sorted(best_by_kind.values(), key=lambda item: item[0], reverse=True)[
+            :candidate_count
+        ]
+        selected = {item[1] for item in kept}
+        if len(kept) < candidate_count:
+            for item in scored:
+                if item[1] in selected:
+                    continue
+                kept.append(item)
+                selected.add(item[1])
+                if len(kept) == candidate_count:
+                    break
         end_turn = next(
             (item for item in scored if item[1].kind is ActionKind.END_TURN),
             None,
@@ -171,12 +212,28 @@ class PolicyGuidedSearch:
         if key in seen:
             return node.value
         if node.state.awaiting_battle:
-            if node.expanded:
+            adaptive = callable(getattr(self.battle_evaluator, "begin_search", None))
+            desired = min(
+                max(1, self.config.battle_max_simulations),
+                max(1, self.config.battle_initial_simulations)
+                * 2 ** int(math.log2(max(1, node.visits + 1))),
+            )
+            if node.expanded and (not adaptive or desired <= node.battle_simulations):
                 value = node.value_prior
             elif self.battle_evaluator is None:
                 value = self._expand(node, rng)
             else:
-                value = float(self.battle_evaluator.evaluate_battle(node.state, rng))
+                if adaptive:
+                    value = float(
+                        self.battle_evaluator.evaluate_battle(
+                            node.state,
+                            rng,
+                            simulations=desired,
+                        )
+                    )
+                    node.battle_simulations = desired
+                else:
+                    value = float(self.battle_evaluator.evaluate_battle(node.state, rng))
                 if not math.isfinite(value):
                     raise ValueError("battle evaluator returned a non-finite value")
                 node.expanded = True
@@ -262,8 +319,4 @@ class PolicyGuidedSearch:
 
     @staticmethod
     def _terminal_value(state: RunState) -> float:
-        if state.trophies >= 10:
-            return 1.0
-        if state.lives <= 0:
-            return -1.0
-        return 0.0
+        return arena_run_value(state) if state.terminal else 0.5

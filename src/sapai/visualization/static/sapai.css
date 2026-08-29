@@ -384,16 +384,12 @@ body {
 }
 
 /* Transition effects are replayed whenever a timeline frame is rendered. */
-.pet.is-attacker.side-player {
-  animation: lunge-player 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
+.pet.is-interacting.side-player {
+  animation: clash-player 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
-.pet.is-attacker.side-opponent {
-  animation: lunge-opponent 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
-}
-
-.pet.is-target {
-  animation: counter-hit 620ms ease-in-out;
+.pet.is-interacting.side-opponent {
+  animation: clash-opponent 620ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
 .pet.is-hurt {
@@ -491,20 +487,14 @@ body {
   font-weight: 900;
 }
 
-@keyframes lunge-player {
+@keyframes clash-player {
   0%, 100% { transform: translateX(0) rotate(0); }
   42% { transform: translateX(48px) rotate(4deg) scale(1.06); }
 }
 
-@keyframes lunge-opponent {
+@keyframes clash-opponent {
   0%, 100% { transform: translateX(0) rotate(0); }
   42% { transform: translateX(-48px) rotate(-4deg) scale(1.06); }
-}
-
-@keyframes counter-hit {
-  0%, 100% { transform: translateX(0); }
-  45% { transform: translateX(-8px) scale(0.97); }
-  60% { transform: translateX(6px); }
 }
 
 @keyframes damage-shake {

@@ -412,7 +412,13 @@ class HumanArenaSession:
 
     def _new_episode_data(self, *, episode_index: int, revision: int) -> _SessionData:
         reset_seed = self._seed_for_episode(episode_index, "reset", 0)
+        version = (
+            next(iter(self.population.versions))
+            if len(self.population.versions) == 1
+            else "current"
+        )
         state = self.environment.reset(pack=self.config.pack, seed=reset_seed)
+        state.version = version
         return _SessionData(
             state=state,
             stage="shop",
@@ -677,8 +683,7 @@ def _battle_result_to_dict(
                 "opponent": team_to_dict(frame.opponent),
                 "log_index": frame.log_index,
                 "event": frame.event,
-                "actor_id": frame.actor_id,
-                "target_id": frame.target_id,
+                "participant_ids": list(frame.participant_ids),
             }
             for frame in result.frames
         ]

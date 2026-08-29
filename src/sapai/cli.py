@@ -4,14 +4,19 @@ import argparse
 import hashlib
 import json
 import os
+import random
+import shutil
+import subprocess
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sapai.data.library import SapLibraryClient, read_replay_jsonl
 from sapai.data.replay import ReplayParser
 from sapai.data.serialization import read_boards, write_boards
+from sapai.rewards import POLICY_TARGET_SCHEMA, VALUE_OBJECTIVE
 from sapai.sim.battle import BattleSimulator
 from sapai.sim.catalog import PACK_ALIASES, Catalog
 from sapai.sim.models import Team
@@ -19,9 +24,11 @@ from sapai.sim.shop import ShopEnvironment
 from sapai.training.arena import (
     ArenaRunner,
     HeuristicPolicy,
+    MixturePolicy,
     ModelPolicy,
     RandomPolicy,
     SearchPolicy,
+    evaluate_arena_policy,
     read_arena_decisions,
     write_arena_decisions,
 )
@@ -29,7 +36,7 @@ from sapai.training.population import (
     OpponentPopulation,
     SimulatorPopulationEvaluator,
     load_opponent_boards,
-    load_opponent_population,
+    split_opponent_populations,
 )
 
 if TYPE_CHECKING:
@@ -71,10 +78,11 @@ def _add_arena_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--policy-weights", help="policy .weights.h5 file or model directory")
     parser.add_argument("--pack", default="Turtle", choices=sorted(PACK_ALIASES))
+    parser.add_argument("--board-version", help="exact replay patch version to evaluate")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-decisions-per-turn", type=int, default=30)
     parser.add_argument("--search-simulations", type=int, default=32)
-    parser.add_argument("--search-candidates", type=int, default=8)
+    parser.add_argument("--search-candidates", type=int, default=16)
     parser.add_argument(
         "--battle-evaluation-simulations",
         type=int,
@@ -173,14 +181,22 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument("--boards", required=True)
     sequence.add_argument("--workdir", required=True)
     sequence.add_argument("--pack", default="Turtle", choices=("Turtle",))
+    sequence.add_argument("--board-version", help="exact replay patch version to train on")
+    sequence.add_argument("--validation-fraction", type=float, default=0.1)
+    sequence.add_argument("--test-fraction", type=float, default=0.1)
+    sequence.add_argument("--validation-episodes", type=int, default=8)
+    sequence.add_argument("--test-episodes", type=int, default=16)
     sequence.add_argument("--bootstrap-episodes", type=int, default=100)
     sequence.add_argument("--bootstrap-epochs", type=int, default=10)
+    sequence.add_argument("--bootstrap-exploration", type=float, default=0.25)
     sequence.add_argument("--search-episodes", type=int, default=50)
     sequence.add_argument("--search-epochs", type=int, default=5)
+    sequence.add_argument("--search-iterations", type=int, default=3)
+    sequence.add_argument("--bootstrap-replay-fraction", type=float, default=0.15)
     sequence.add_argument("--batch-size", type=int, default=64)
     sequence.add_argument("--seed", type=int, default=0)
     sequence.add_argument("--search-simulations", type=int, default=32)
-    sequence.add_argument("--search-candidates", type=int, default=8)
+    sequence.add_argument("--search-candidates", type=int, default=16)
     sequence.add_argument("--battle-evaluation-simulations", type=int, default=8)
     sequence.add_argument(
         "--progress",
@@ -192,15 +208,41 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _population(args, catalog: Catalog) -> OpponentPopulation:
     if getattr(args, "boards", None):
-        return load_opponent_population(args.boards, catalog, args.pack)
+        boards = load_opponent_boards(args.boards, catalog, args.pack)
+        versions: dict[str, int] = {}
+        for board in boards:
+            versions[board.version] = versions.get(board.version, 0) + 1
+        version = getattr(args, "board_version", None) or min(
+            versions, key=lambda item: (-versions[item], item)
+        )
+        selected = [board for board in boards if board.version == version]
+        if not selected:
+            raise ValueError(f"board dataset contains no boards for version {version!r}")
+        args.resolved_board_version = version
+        return OpponentPopulation(selected)
+    args.resolved_board_version = "synthetic"
     return OpponentPopulation.synthetic(catalog, pack=args.pack, seed=args.seed)
 
 
 def _model_config_from_weights(weights: str | Path) -> tuple[ModelConfig, Path]:
-    from sapai.ml.models import ModelConfig
+    from sapai.ml.models import MODEL_SCHEMA_VERSION, ModelConfig
 
     path = Path(weights)
     directory = path if path.is_dir() else path.parent
+    manifest_path = directory / "run-manifest.json"
+    if not manifest_path.exists():
+        raise ValueError(
+            f"unversioned policy weights in {directory}; regenerate them with the v2 pipeline"
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if (
+        manifest.get("kind") != "policy-value"
+        or manifest.get("model_schema") != MODEL_SCHEMA_VERSION
+        or manifest.get("target_schema") != POLICY_TARGET_SCHEMA
+    ):
+        raise ValueError(
+            f"incompatible policy checkpoint contract in {manifest_path}; use v2 weights"
+        )
     config_path = directory / "config.json"
     if config_path.exists():
         raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -255,7 +297,7 @@ def _arena_policy(
         battle,
         population,
         simulations=args.battle_evaluation_simulations,
-        continuation_evaluator=evaluator if args.policy_weights else None,
+        continuation_evaluator=evaluator,
     )
     search = PolicyGuidedSearch(
         environment,
@@ -263,6 +305,8 @@ def _arena_policy(
         SearchConfig(
             simulations=args.search_simulations,
             candidate_actions=args.search_candidates,
+            battle_initial_simulations=min(4, args.battle_evaluation_simulations),
+            battle_max_simulations=args.battle_evaluation_simulations,
         ),
         battle_evaluator=battle_evaluator,
     )
@@ -301,6 +345,50 @@ def _file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _atomic_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".tmp")
+    shutil.copyfile(source, temporary)
+    temporary.replace(destination)
+
+
+def _source_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted((root / "src" / "sapai").rglob("*.py")):
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _catalog_sha256(catalog: Catalog) -> str:
+    payload = {
+        "pets": [asdict(value) for _, value in sorted(catalog.pets.items())],
+        "foods": [asdict(value) for _, value in sorted(catalog.foods.items())],
+        "perks": sorted(catalog.perks.items()),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _repository_commit(root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
 def _generate_episode_dataset(
     runner: ArenaRunner,
     output: Path,
@@ -309,6 +397,7 @@ def _generate_episode_dataset(
     episodes: int,
     pack: str,
     seed: int,
+    version: str = "current",
     identity: dict[str, object],
     progress: Callable[[int, int, bool], None] | None = None,
 ) -> int:
@@ -317,8 +406,10 @@ def _generate_episode_dataset(
     episode_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = episode_dir / "manifest.json"
     manifest = {
-        "format": "sapai-arena-episodes-v1",
+        "format": "sapai-arena-episodes-v2",
+        "target_schema": POLICY_TARGET_SCHEMA,
         "pack": pack,
+        "version": version,
         "seed": seed,
         **identity,
     }
@@ -331,7 +422,9 @@ def _generate_episode_dataset(
     else:
         if any(episode_dir.glob("*.jsonl")):
             raise ValueError(f"Arena episodes have no manifest: {episode_dir}")
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        temporary_manifest = manifest_path.with_suffix(".json.tmp")
+        temporary_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        temporary_manifest.replace(manifest_path)
     paths: list[Path] = []
     progress_interval = max(1, episodes // 20)
     for episode in range(episodes):
@@ -342,7 +435,11 @@ def _generate_episode_dataset(
             if not read_arena_decisions(episode_path):
                 raise ValueError(f"checkpointed Arena episode is empty: {episode_path}")
         else:
-            decisions = runner.run(pack=pack, seed=seed + episode).decisions
+            decisions = runner.run(
+                pack=pack,
+                version=version,
+                seed=seed + episode,
+            ).decisions
             temporary = episode_path.with_suffix(".jsonl.tmp")
             write_arena_decisions(temporary, decisions)
             temporary.replace(episode_path)
@@ -356,6 +453,46 @@ def _generate_episode_dataset(
     for episode_path in paths:
         combined.extend(read_arena_decisions(episode_path))
     return write_arena_decisions(output, combined)
+
+
+def _write_replay_mixture(
+    output: Path,
+    *,
+    bootstrap_path: Path,
+    search_paths: list[Path],
+    bootstrap_fraction: float,
+    seed: int,
+) -> int:
+    """Mix bootstrap coverage with the latest and prior search trajectories."""
+
+    if not 0.0 <= bootstrap_fraction < 1.0:
+        raise ValueError("bootstrap replay fraction must be in [0, 1)")
+    if not search_paths:
+        raise ValueError("at least one search dataset is required")
+    rng = random.Random(seed)
+    bootstrap = read_arena_decisions(bootstrap_path)
+    latest = read_arena_decisions(search_paths[-1])
+    older = [
+        decision
+        for path in search_paths[:-1]
+        for decision in read_arena_decisions(path)
+    ]
+    if not latest:
+        raise ValueError("latest search replay dataset is empty")
+    if older:
+        older_count = min(len(older), len(latest))
+        replay = latest + rng.sample(older, older_count)
+    else:
+        replay = list(latest)
+    bootstrap_count = round(len(replay) * bootstrap_fraction / (1.0 - bootstrap_fraction))
+    if bootstrap_count and not bootstrap:
+        raise ValueError("bootstrap replay dataset is empty")
+    if bootstrap_count <= len(bootstrap):
+        replay.extend(rng.sample(bootstrap, bootstrap_count))
+    else:
+        replay.extend(rng.choice(bootstrap) for _ in range(bootstrap_count))
+    rng.shuffle(replay)
+    return write_arena_decisions(output, replay)
 
 
 def _battle_dataset_for_sequence(
@@ -473,34 +610,117 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
 
         return report
 
+    if args.search_iterations < 1:
+        raise ValueError("search iterations must be positive")
     root = Path(args.workdir)
-    emit("sequence", f"starting full run in {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    emit("sequence", f"starting iterative policy improvement in {root}")
     boards = load_opponent_boards(args.boards, catalog, args.pack)
     boards_sha256 = _file_sha256(args.boards)
-    emit("boards", f"loaded {len(boards)} compatible {args.pack} boards")
-    population = OpponentPopulation(boards)
-    emit("population", f"prepared {len(boards)} simulator opponents")
-
-    environment = ShopEnvironment(catalog)
-    bootstrap_runner = ArenaRunner(
-        environment,
-        BattleSimulator(catalog),
-        population,
-        HeuristicPolicy(),
+    simulator = BattleSimulator(catalog)
+    sequence_manifest = {
+        "format": "sapai-training-sequence-v2",
+        "objective": VALUE_OBJECTIVE,
+        "target_schema": POLICY_TARGET_SCHEMA,
+        "boards_sha256": boards_sha256,
+        "source_sha256": _source_sha256(PROJECT_ROOT),
+        "repository_commit": _repository_commit(PROJECT_ROOT),
+        "catalog_sha256": _catalog_sha256(catalog),
+        "rules_sha256": hashlib.sha256(
+            json.dumps(
+                simulator.rules.data,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+        "simulator": {
+            "max_rounds": simulator.MAX_ROUNDS,
+            "max_events": simulator.MAX_EVENTS,
+            "record_training_trace": False,
+        },
+        "settings": {
+            key: getattr(args, key)
+            for key in (
+                "pack",
+                "board_version",
+                "validation_fraction",
+                "test_fraction",
+                "validation_episodes",
+                "test_episodes",
+                "bootstrap_episodes",
+                "bootstrap_epochs",
+                "bootstrap_exploration",
+                "search_episodes",
+                "search_epochs",
+                "search_iterations",
+                "bootstrap_replay_fraction",
+                "batch_size",
+                "seed",
+                "search_simulations",
+                "search_candidates",
+                "battle_evaluation_simulations",
+            )
+        },
+    }
+    sequence_manifest_path = root / "sequence-manifest.json"
+    if sequence_manifest_path.exists():
+        existing_sequence = json.loads(
+            sequence_manifest_path.read_text(encoding="utf-8")
+        )
+        if existing_sequence != sequence_manifest:
+            raise ValueError(
+                f"training sequence inputs or code changed in {root}; use a new workdir"
+            )
+    else:
+        existing_outputs = [
+            path for path in root.iterdir() if path.name != sequence_manifest_path.name
+        ]
+        if existing_outputs:
+            raise ValueError(
+                f"legacy or unversioned training outputs found in {root}; use a new v2 workdir"
+            )
+        _atomic_json(sequence_manifest_path, sequence_manifest)
+    populations = split_opponent_populations(
+        boards,
+        version=args.board_version,
+        validation_fraction=args.validation_fraction,
+        test_fraction=args.test_fraction,
+        seed=args.seed,
     )
+    emit(
+        "population",
+        f"prepared replay-safe populations for patch {populations.version}",
+    )
+
     bootstrap_path = root / "arena-bootstrap.jsonl"
-    emit("bootstrap-rollouts", "generating or reusing heuristic Arena episodes")
+    bootstrap_runner = ArenaRunner(
+        ShopEnvironment(catalog),
+        BattleSimulator(catalog),
+        populations.train,
+        MixturePolicy(
+            HeuristicPolicy(),
+            RandomPolicy(),
+            exploration_probability=args.bootstrap_exploration,
+        ),
+        record_timeline=False,
+    )
+    emit("bootstrap-rollouts", "generating or reusing exploratory bootstrap episodes")
     bootstrap_decisions = _generate_episode_dataset(
         bootstrap_runner,
         bootstrap_path,
         episode_dir=root / "arena-bootstrap-episodes",
         episodes=args.bootstrap_episodes,
         pack=args.pack,
+        version=populations.version,
         seed=args.seed,
         identity={
-            "policy": "heuristic",
+            "policy": "heuristic-exploration-mixture",
+            "exploration_probability": args.bootstrap_exploration,
             "boards_sha256": boards_sha256,
+            "board_version": populations.version,
+            "board_counts": populations.board_counts,
             "episodes": args.bootstrap_episodes,
+            "target_schema": POLICY_TARGET_SCHEMA,
         },
         progress=(
             lambda completed, total, reused: emit(
@@ -513,104 +733,256 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         if progress is not None
         else None,
     )
-    emit("bootstrap-rollouts", f"assembled {bootstrap_decisions} policy decisions")
     policy_dir = root / "policy-model"
-    emit("bootstrap-training", "loading policy model and checkpoint")
     bootstrap_summary = train_policy_model(
         bootstrap_path,
         policy_dir,
         training_config=_training_config(args, epochs=args.bootstrap_epochs),
         progress=training_progress("bootstrap-training"),
     )
-    emit(
-        "bootstrap-training",
-        "bootstrap policy ready",
-        completed=args.bootstrap_epochs,
-        total=args.bootstrap_epochs,
-    )
 
-    policy_args = argparse.Namespace(
-        policy="search",
-        policy_weights=str(policy_dir),
-        pack=args.pack,
-        seed=args.seed,
-        search_simulations=args.search_simulations,
-        search_candidates=args.search_candidates,
-        battle_evaluation_simulations=args.battle_evaluation_simulations,
-    )
-    search_battle = BattleSimulator(catalog)
-    search_runner = ArenaRunner(
-        environment,
-        search_battle,
-        population,
-        _arena_policy(
-            policy_args,
-            environment,
-            battle=search_battle,
-            population=population,
-        ),
-    )
-    search_path = root / "arena-search.jsonl"
-    emit("search-rollouts", "generating or reusing search-guided Arena episodes")
-    search_decisions = _generate_episode_dataset(
-        search_runner,
-        search_path,
-        episode_dir=root / "arena-search-episodes",
-        episodes=args.search_episodes,
-        pack=args.pack,
-        seed=args.seed + 100_000,
-        identity={
-            "policy": "search",
-            "boards_sha256": boards_sha256,
-            "episodes": args.search_episodes,
-            "bootstrap_episodes": args.bootstrap_episodes,
-            "bootstrap_epochs": args.bootstrap_epochs,
-            "batch_size": args.batch_size,
-            "search_simulations": args.search_simulations,
-            "search_candidates": args.search_candidates,
-            "battle_evaluation_simulations": args.battle_evaluation_simulations,
-        },
-        progress=(
-            lambda completed, total, reused: emit(
-                "search-rollouts",
-                "episode checkpoint reused" if reused else "episode checkpoint saved",
-                completed=completed,
-                total=total,
+    evaluation_dir = root / "evaluations"
+    evaluation_dir.mkdir(parents=True, exist_ok=True)
+    best_weights = policy_dir / "best-policy.weights.h5"
+    best_path = evaluation_dir / "best.json"
+
+    def evaluate_checkpoint(
+        population: OpponentPopulation,
+        *,
+        weights: Path,
+        episodes: int,
+        seed: int,
+        include_heuristic: bool,
+    ) -> dict[str, object]:
+        evaluated: dict[str, object] = {}
+        if include_heuristic:
+            evaluated["heuristic"] = evaluate_arena_policy(
+                ArenaRunner(
+                    ShopEnvironment(catalog),
+                    BattleSimulator(catalog),
+                    population,
+                    HeuristicPolicy(),
+                    record_timeline=False,
+                ),
+                episodes=episodes,
+                pack=args.pack,
+                version=populations.version,
+                seed=seed,
             )
+        for policy_name in ("model", "search"):
+            environment = ShopEnvironment(catalog)
+            battle = BattleSimulator(catalog)
+            policy_args = argparse.Namespace(
+                policy=policy_name,
+                policy_weights=str(weights),
+                pack=args.pack,
+                seed=seed,
+                search_simulations=args.search_simulations,
+                search_candidates=args.search_candidates,
+                battle_evaluation_simulations=args.battle_evaluation_simulations,
+            )
+            evaluated[policy_name] = evaluate_arena_policy(
+                ArenaRunner(
+                    environment,
+                    battle,
+                    population,
+                    _arena_policy(
+                        policy_args,
+                        environment,
+                        battle=battle,
+                        population=population,
+                    ),
+                    record_timeline=False,
+                ),
+                episodes=episodes,
+                pack=args.pack,
+                version=populations.version,
+                seed=seed,
+            )
+        return evaluated
+
+    def score(evaluation: Mapping[str, object]) -> tuple[float, float]:
+        search = evaluation["search"]
+        if not isinstance(search, Mapping):
+            raise TypeError("invalid search evaluation")
+        return float(search["completion_rate"]), float(search["mean_trophies"])
+
+    bootstrap_evaluation_path = evaluation_dir / "bootstrap.json"
+    if bootstrap_evaluation_path.exists():
+        bootstrap_evaluation = json.loads(
+            bootstrap_evaluation_path.read_text(encoding="utf-8")
         )
-        if progress is not None
-        else None,
-    )
-    emit("search-rollouts", f"assembled {search_decisions} policy decisions")
-    emit("distillation-training", "restoring policy model for search distillation")
-    distill_summary = train_policy_model(
-        search_path,
-        policy_dir,
-        training_config=_training_config(
-            args, epochs=args.bootstrap_epochs + args.search_epochs
-        ),
-        resume=True,
-        progress=training_progress("distillation-training"),
-    )
-    emit(
-        "distillation-training",
-        "distilled policy ready",
-        completed=args.bootstrap_epochs + args.search_epochs,
-        total=args.bootstrap_epochs + args.search_epochs,
-    )
+    else:
+        bootstrap_evaluation = evaluate_checkpoint(
+            populations.validation,
+            weights=policy_dir / "policy.weights.h5",
+            episodes=args.validation_episodes,
+            seed=args.seed + 500_000,
+            include_heuristic=True,
+        )
+        _atomic_json(bootstrap_evaluation_path, bootstrap_evaluation)
+    if best_path.exists():
+        best = json.loads(best_path.read_text(encoding="utf-8"))
+        if not best_weights.exists() or _file_sha256(best_weights) != best.get(
+            "weights_sha256"
+        ):
+            raise ValueError("best checkpoint is missing or does not match evaluations/best.json")
+    else:
+        _atomic_copy(policy_dir / "policy.weights.h5", best_weights)
+        best = {
+            "stage": "bootstrap",
+            "score": list(score(bootstrap_evaluation)),
+            "weights_sha256": _file_sha256(best_weights),
+        }
+        _atomic_json(best_path, best)
+
+    search_paths: list[Path] = []
+    iterations: list[dict[str, object]] = []
+    for iteration in range(1, args.search_iterations + 1):
+        stage = f"search-{iteration}"
+        search_path = root / f"arena-search-{iteration:02d}.jsonl"
+        search_paths.append(search_path)
+        environment = ShopEnvironment(catalog)
+        battle = BattleSimulator(catalog)
+        policy_args = argparse.Namespace(
+            policy="search",
+            policy_weights=str(best_weights),
+            pack=args.pack,
+            seed=args.seed,
+            search_simulations=args.search_simulations,
+            search_candidates=args.search_candidates,
+            battle_evaluation_simulations=args.battle_evaluation_simulations,
+        )
+        runner = ArenaRunner(
+            environment,
+            battle,
+            populations.train,
+            _arena_policy(
+                policy_args,
+                environment,
+                battle=battle,
+                population=populations.train,
+            ),
+            record_timeline=False,
+        )
+        emit(stage, "generating or reusing search-guided episodes")
+        search_decisions = _generate_episode_dataset(
+            runner,
+            search_path,
+            episode_dir=root / f"arena-search-{iteration:02d}-episodes",
+            episodes=args.search_episodes,
+            pack=args.pack,
+            version=populations.version,
+            seed=args.seed + iteration * 100_000,
+            identity={
+                "policy": "search",
+                "iteration": iteration,
+                "teacher_weights_sha256": _file_sha256(best_weights),
+                "boards_sha256": boards_sha256,
+                "board_version": populations.version,
+                "episodes": args.search_episodes,
+                "search_simulations": args.search_simulations,
+                "search_candidates": args.search_candidates,
+                "battle_evaluation_simulations": args.battle_evaluation_simulations,
+                "target_schema": POLICY_TARGET_SCHEMA,
+            },
+            progress=(
+                lambda completed, total, reused, name=stage: emit(
+                    name,
+                    "episode checkpoint reused" if reused else "episode checkpoint saved",
+                    completed=completed,
+                    total=total,
+                )
+            )
+            if progress is not None
+            else None,
+        )
+        replay_path = root / f"policy-replay-{iteration:02d}.jsonl"
+        replay_decisions = _write_replay_mixture(
+            replay_path,
+            bootstrap_path=bootstrap_path,
+            search_paths=search_paths,
+            bootstrap_fraction=args.bootstrap_replay_fraction,
+            seed=args.seed + iteration,
+        )
+        target_epochs = args.bootstrap_epochs + iteration * args.search_epochs
+        training_summary = train_policy_model(
+            replay_path,
+            policy_dir,
+            training_config=_training_config(args, epochs=target_epochs),
+            resume=True,
+            progress=training_progress(f"distillation-{iteration}"),
+        )
+        evaluation_path = evaluation_dir / f"iteration-{iteration:02d}.json"
+        if evaluation_path.exists():
+            evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+        else:
+            evaluation = evaluate_checkpoint(
+                populations.validation,
+                weights=policy_dir / "policy.weights.h5",
+                episodes=args.validation_episodes,
+                seed=args.seed + 500_000,
+                include_heuristic=False,
+            )
+            _atomic_json(evaluation_path, evaluation)
+        candidate_score = score(evaluation)
+        best_score = tuple(float(item) for item in best["score"])
+        promoted = candidate_score >= best_score
+        if promoted:
+            _atomic_copy(policy_dir / "policy.weights.h5", best_weights)
+            best = {
+                "stage": f"iteration-{iteration}",
+                "score": list(candidate_score),
+                "weights_sha256": _file_sha256(best_weights),
+            }
+            _atomic_json(best_path, best)
+        iterations.append(
+            {
+                "iteration": iteration,
+                "search_decisions": search_decisions,
+                "replay_decisions": replay_decisions,
+                "training": training_summary,
+                "validation": evaluation,
+                "promoted": promoted,
+            }
+        )
+        emit(stage, "iteration evaluated and checkpoint gate applied")
+
+    _atomic_copy(best_weights, policy_dir / "policy.weights.h5")
+    final_test_path = evaluation_dir / "test.json"
+    if final_test_path.exists():
+        final_test = json.loads(final_test_path.read_text(encoding="utf-8"))
+    else:
+        final_test = evaluate_checkpoint(
+            populations.test,
+            weights=best_weights,
+            episodes=args.test_episodes,
+            seed=args.seed + 600_000,
+            include_heuristic=True,
+        )
+        _atomic_json(final_test_path, final_test)
     summary = {
+        "format": "sapai-training-sequence-v2",
+        "objective": VALUE_OBJECTIVE,
+        "target_schema": POLICY_TARGET_SCHEMA,
+        "boards_sha256": boards_sha256,
+        "population_split": {
+            "version": populations.version,
+            "counts": populations.board_counts,
+            "unit": "replay_id",
+        },
         "battle_evaluation": {
-            "kind": "native-simulator",
-            "simulations_per_leaf": args.battle_evaluation_simulations,
-            "opponents": len(boards),
+            "kind": "native-simulator-common-panel",
+            "max_simulations_per_leaf": args.battle_evaluation_simulations,
         },
         "bootstrap_decisions": bootstrap_decisions,
         "bootstrap_training": bootstrap_summary,
-        "search_decisions": search_decisions,
-        "distillation_training": distill_summary,
+        "bootstrap_validation": bootstrap_evaluation,
+        "iterations": iterations,
+        "best": best,
+        "final_test": final_test,
     }
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    _atomic_json(root / "summary.json", summary)
     emit("sequence", f"full training complete; summary saved to {root / 'summary.json'}")
     return summary
 
@@ -730,7 +1102,11 @@ def main(argv: list[str] | None = None) -> int:
         decisions = []
         results = []
         for episode in range(args.episodes):
-            run = runner.run(pack=args.pack, seed=args.seed + episode)
+            run = runner.run(
+                pack=args.pack,
+                version=args.resolved_board_version,
+                seed=args.seed + episode,
+            )
             decisions.extend(run.decisions)
             results.append({"trophies": run.final_state.trophies, "turns": len(run.turns)})
         count = write_arena_decisions(args.output, decisions)
@@ -750,7 +1126,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "visualize-arena":
         from sapai.visualization import render_arena_html
 
-        run = _runner(args, catalog).run(pack=args.pack, seed=args.seed)
+        runner = _runner(args, catalog)
+        run = runner.run(
+            pack=args.pack,
+            version=args.resolved_board_version,
+            seed=args.seed,
+        )
         output = render_arena_html(run, args.output, args.assets)
         _json(
             {

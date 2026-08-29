@@ -13,7 +13,8 @@ a friend faints in the shop.
 
 ## What is implemented
 
-- Exact, seeded shop transitions and native Turtle battle simulation.
+- Exact, seeded shop transitions and native Turtle battle simulation with
+  undirected, simultaneous front-pet clashes.
 - Structured battle frames and complete Arena shop/battle timelines.
 - Sprite lookup through `assets/data/*NameId*` mappings, including token names.
 - Self-contained battle and Arena HTML visualizations.
@@ -23,7 +24,7 @@ a friend faints in the shop.
 - Checkpointed policy/value training with resume support.
 - Exact simulator-scored MCTS battle leaves against empirical opponent populations.
 - Complete Arena rollouts using heuristic, random, model, or MCTS policies.
-- Search distillation with 8 root candidates and 32 simulations by default.
+- Iterative search distillation with 16 action-kind-balanced root candidates by default.
 - Batched TensorFlow policy/value evaluation through `evaluate_many`.
 - A one-command training sequence and a Google Colab notebook.
 
@@ -234,7 +235,9 @@ python -m sapai.cli train-policy \
 ```
 
 Each decision includes the exact legal actions, selected/target policy,
-next-battle W/D/L, terminal run value, and final trophy count.
+policy-conditioned next-battle W/D/L, Arena-completion target, and normalized
+final trophy target. The value head is a calibrated probability in `[0, 1]`:
+ten trophies is 1 and a terminal loss is 0; trophies are not folded into it.
 
 ### 2. Search with exact battles and distill root visits
 
@@ -243,9 +246,9 @@ python -m sapai.cli generate-arena \
   --boards data/boards.jsonl \
   --policy search \
   --policy-weights runs/policy-model \
-  --search-candidates 8 \
+  --search-candidates 16 \
   --search-simulations 32 \
-  --battle-evaluation-simulations 8 \
+  --battle-evaluation-simulations 16 \
   --episodes 250 \
   --output runs/arena-search.jsonl \
   --seed 3026
@@ -261,11 +264,12 @@ python -m sapai.cli train-policy \
 The second policy command resumes the 20-epoch checkpoint and trains through
 epoch 25, so it performs five distillation epochs.
 
-When an MCTS branch reaches `END_TURN`, search samples compatible boards from
-the same empirical opponent population and runs the native simulator. Each
+When an MCTS branch reaches `END_TURN`, search uses a common opponent-and-seed
+panel for all candidate teams and runs the native simulator. Promising leaves
+are adaptively resampled up to `--battle-evaluation-simulations`. Each
 hypothetical outcome is applied to a cloned Arena state, and the resulting
 next-turn states are evaluated together by the policy value head. Terminal
-outcomes use the exact Arena reward. This avoids both the zero-valued end-turn
+outcomes use the exact Arena-completion target. This avoids both the zero-valued end-turn
 leaf and the approximation error and training cost of a separate battle
 network. `--battle-evaluation-simulations` controls the accuracy/cost tradeoff.
 
@@ -285,14 +289,26 @@ python -m sapai.cli train-sequence \
   --bootstrap-epochs 20 \
   --search-episodes 250 \
   --search-epochs 5 \
-  --battle-evaluation-simulations 8 \
+  --search-iterations 3 \
+  --search-candidates 16 \
+  --battle-evaluation-simulations 16 \
+  --validation-episodes 20 \
+  --test-episodes 50 \
   --batch-size 128 \
   --seed 2026
 ```
 
-Outputs include manifests, model configs, rolling policy checkpoints, final
-weights, training histories, resumable per-episode rollout files, both combined
-trajectory datasets, and a final `summary.json`.
+The command pins one replay patch, splits whole replay IDs into train,
+validation, and test populations, and starts bootstrap data with a
+heuristic/exploratory mixture that covers every legal action kind. Each search
+iteration trains on the latest trajectories plus sampled older search and
+bootstrap replay. Fixed-seed validation Arena runs promote the best checkpoint;
+the test population is evaluated only after selection.
+
+Outputs include immutable sequence/model manifests, model configs, rolling
+policy checkpoints, final and best weights, training histories, resumable
+per-episode rollout files, replay mixtures, held-out evaluations, and a final
+`summary.json`.
 
 After a Colab disconnect, reconnect with the same `DRIVE_RUN_DIR`, board export,
 seed, and data-generation counts. Rerunning `train-sequence` reuses completed
@@ -300,9 +316,11 @@ datasets and rollout episodes and restores model plus optimizer state from the
 latest epoch checkpoint. Only an epoch interrupted before its checkpoint is
 repeated.
 
-Runs created before simulator-scored battle leaves were introduced are not
-resume-compatible with this search target. Preserve those artifacts and choose
-a fresh run directory; subsequent interruptions of the new run resume normally.
+The v2 target schema and entity-conditioned action head are intentionally not
+checkpoint-compatible with earlier runs. Preserve old artifacts and choose a
+fresh run directory. Immutable manifests reject changed board hashes, source,
+rules, model contracts, and training settings instead of partially restoring.
+Subsequent interruptions of an unchanged v2 run resume normally.
 
 Keras optimizer slots are built before checkpoint restoration so model tensors
 tracked through Keras 3 optimizers are matched immediately. Each newly completed
@@ -340,9 +358,11 @@ The policy/value transformer encodes 13 entities:
 ```
 
 It scores simulator-generated legal actions represented by
-`(kind, source, target, reorder permutation)` and produces legal-action logits,
-run value, next-battle W/D/L, and expected final wins. Illegal actions never
-enter the softmax. The optional standalone `BattleModel` commands remain
+`(kind, source, target, reorder permutation)`. In addition to positional IDs,
+the policy head gathers the encoded source pet/food, target pet, and ordered
+team entities directly. It produces legal-action logits, Arena-completion
+probability, policy-conditioned next-battle W/D/L, and normalized expected
+final trophies. Illegal actions never enter the softmax. The optional standalone `BattleModel` commands remain
 available for offline W/D/L experiments, but the recommended notebook and
 `train-sequence` path do not train or consume that network.
 

@@ -41,8 +41,7 @@ function mountHumanArena(root, initialView, invokeCommand, platformName) {
       animation.healthDelta < 0 ? "is-hurt" : "",
       animation.attackDelta > 0 || animation.healthDelta > 0 ? "is-buffed" : "",
       animation.perkChanged ? "perk-changed" : "",
-      animation.role === "attacker" ? "is-attacker" : "",
-      animation.role === "target" ? "is-target" : "",
+      animation.role === "interactor" ? "is-interacting" : "",
       side ? `side-${side}` : "",
     ].filter(Boolean).join(" ");
   }
