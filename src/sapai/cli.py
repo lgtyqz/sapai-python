@@ -232,7 +232,7 @@ def _model_config_from_weights(weights: str | Path) -> tuple[ModelConfig, Path]:
     manifest_path = directory / "run-manifest.json"
     if not manifest_path.exists():
         raise ValueError(
-            f"unversioned policy weights in {directory}; regenerate them with the v2 pipeline"
+            f"unversioned policy weights in {directory}; regenerate them with the v3 pipeline"
         )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (
@@ -241,7 +241,7 @@ def _model_config_from_weights(weights: str | Path) -> tuple[ModelConfig, Path]:
         or manifest.get("target_schema") != POLICY_TARGET_SCHEMA
     ):
         raise ValueError(
-            f"incompatible policy checkpoint contract in {manifest_path}; use v2 weights"
+            f"incompatible policy checkpoint contract in {manifest_path}; use v3 weights"
         )
     config_path = directory / "config.json"
     if config_path.exists():
@@ -406,7 +406,7 @@ def _generate_episode_dataset(
     episode_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = episode_dir / "manifest.json"
     manifest = {
-        "format": "sapai-arena-episodes-v2",
+        "format": "sapai-arena-episodes-v3",
         "target_schema": POLICY_TARGET_SCHEMA,
         "pack": pack,
         "version": version,
@@ -619,7 +619,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     boards_sha256 = _file_sha256(args.boards)
     simulator = BattleSimulator(catalog)
     sequence_manifest = {
-        "format": "sapai-training-sequence-v2",
+        "format": "sapai-training-sequence-v3",
         "objective": VALUE_OBJECTIVE,
         "target_schema": POLICY_TARGET_SCHEMA,
         "boards_sha256": boards_sha256,
@@ -677,7 +677,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         ]
         if existing_outputs:
             raise ValueError(
-                f"legacy or unversioned training outputs found in {root}; use a new v2 workdir"
+                f"legacy or unversioned training outputs found in {root}; use a new v3 workdir"
             )
         _atomic_json(sequence_manifest_path, sequence_manifest)
     populations = split_opponent_populations(
@@ -962,7 +962,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         )
         _atomic_json(final_test_path, final_test)
     summary = {
-        "format": "sapai-training-sequence-v2",
+        "format": "sapai-training-sequence-v3",
         "objective": VALUE_OBJECTIVE,
         "target_schema": POLICY_TARGET_SCHEMA,
         "boards_sha256": boards_sha256,

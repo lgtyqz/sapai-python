@@ -57,8 +57,6 @@ class HeuristicPolicy:
         self, state: RunState, actions: list[Action], rng: random.Random
     ) -> PolicyChoice:
         useful = [action for action in actions if action.kind in self.PRIORITY]
-        if state.gold < 3:
-            useful = [action for action in useful if action.kind is ActionKind.END_TURN]
         if not useful:
             action = next(action for action in actions if action.kind is ActionKind.END_TURN)
         else:
@@ -76,11 +74,14 @@ class RandomPolicy:
         self, state: RunState, actions: list[Action], rng: random.Random
     ) -> PolicyChoice:
         end = next(action for action in actions if action.kind is ActionKind.END_TURN)
-        if state.gold < 1 or rng.random() < 0.15:
+        roll_available = any(action.kind is ActionKind.ROLL for action in actions)
+        if state.gold < 1 or not roll_available:
             action = end
         else:
             by_kind: dict[ActionKind, list[Action]] = {}
             for candidate in actions:
+                if candidate.kind is ActionKind.END_TURN:
+                    continue
                 by_kind.setdefault(candidate.kind, []).append(candidate)
             chosen_kind = rng.choice(list(by_kind))
             action = rng.choice(by_kind[chosen_kind])
@@ -124,6 +125,23 @@ class ModelPolicy:
         self, state: RunState, actions: list[Action], rng: random.Random
     ) -> PolicyChoice:
         probabilities, _ = self.evaluator.evaluate(state, actions)
+        probabilities = list(probabilities)
+        if state.gold > 0 and any(action.kind is ActionKind.ROLL for action in actions):
+            for index, action in enumerate(actions):
+                if action.kind is ActionKind.END_TURN:
+                    probabilities[index] = 0.0
+            total = sum(probabilities)
+            if total <= 0:
+                allowed = [
+                    index
+                    for index, action in enumerate(actions)
+                    if action.kind is not ActionKind.END_TURN
+                ]
+                probabilities = [0.0] * len(actions)
+                for index in allowed:
+                    probabilities[index] = 1.0 / len(allowed)
+            else:
+                probabilities = [value / total for value in probabilities]
         if self.sample:
             action = rng.choices(actions, weights=probabilities, k=1)[0]
         else:

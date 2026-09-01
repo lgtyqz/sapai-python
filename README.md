@@ -269,9 +269,13 @@ panel for all candidate teams and runs the native simulator. Promising leaves
 are adaptively resampled up to `--battle-evaluation-simulations`. Each
 hypothetical outcome is applied to a cloned Arena state, and the resulting
 next-turn states are evaluated together by the policy value head. Terminal
-outcomes use the exact Arena-completion target. This avoids both the zero-valued end-turn
-leaf and the approximation error and training cost of a separate battle
-network. `--battle-evaluation-simulations` controls the accuracy/cost tradeoff.
+outcomes use the exact Arena-completion target. Unvisited actions use the
+parent's completion estimate as their first-play value, rather than an
+out-of-scale zero. `END_TURN` is excluded from policy targets while a legal
+roll can spend remaining gold; the full legal action remains available to
+human players. These rules avoid both premature-turn policy collapse and the
+approximation error and training cost of a separate battle network.
+`--battle-evaluation-simulations` controls the accuracy/cost tradeoff.
 
 Freeze choices are canonicalized once per shop roll: changing an offer's
 frozen state removes its inverse action until the next roll. MCTS also skips
@@ -300,10 +304,11 @@ python -m sapai.cli train-sequence \
 
 The command pins one replay patch, splits whole replay IDs into train,
 validation, and test populations, and starts bootstrap data with a
-heuristic/exploratory mixture that covers every legal action kind. Each search
-iteration trains on the latest trajectories plus sampled older search and
-bootstrap replay. Fixed-seed validation Arena runs promote the best checkpoint;
-the test population is evaluated only after selection.
+heuristic/exploratory mixture that covers every productive legal action kind
+before ending at zero gold. Each search iteration trains on the latest
+trajectories plus sampled older search and bootstrap replay. Fixed-seed
+validation Arena runs promote the best checkpoint; the test population is
+evaluated only after selection.
 
 Outputs include immutable sequence/model manifests, model configs, rolling
 policy checkpoints, final and best weights, training histories, resumable
@@ -316,11 +321,13 @@ datasets and rollout episodes and restores model plus optimizer state from the
 latest epoch checkpoint. Only an epoch interrupted before its checkpoint is
 repeated.
 
-The v2 target schema and entity-conditioned action head are intentionally not
-checkpoint-compatible with earlier runs. Preserve old artifacts and choose a
-fresh run directory. Immutable manifests reject changed board hashes, source,
-rules, model contracts, and training settings instead of partially restoring.
-Subsequent interruptions of an unchanged v2 run resume normally.
+The v3 target schema and entity-conditioned action head are intentionally not
+checkpoint-compatible with earlier runs. V3 corrects the first-play value
+scale and removes dominated positive-gold `END_TURN` targets. Preserve old
+artifacts and choose a fresh run directory. Immutable manifests reject changed
+board hashes, source, rules, model contracts, and training settings instead of
+partially restoring. Subsequent interruptions of an unchanged v3 run resume
+normally.
 
 Keras optimizer slots are built before checkpoint restoration so model tensors
 tracked through Keras 3 optimizers are matched immediately. Each newly completed

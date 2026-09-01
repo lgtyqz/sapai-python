@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sapai.sim.models import RunState
 
-POLICY_TARGET_SCHEMA = "sapai-policy-targets-v2"
+POLICY_TARGET_SCHEMA = "sapai-policy-targets-v3"
 VALUE_OBJECTIVE = "arena-completion-probability"
 
 

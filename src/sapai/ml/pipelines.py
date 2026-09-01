@@ -109,7 +109,7 @@ def _write_run_metadata(
     else:
         if (output / "checkpoints").exists() or (output / "config.json").exists():
             raise ValueError(
-                f"legacy unversioned checkpoints found in {output}; use a new v2 output directory"
+                f"legacy unversioned checkpoints found in {output}; use a new v3 output directory"
             )
         manifest = {**immutable, "datasets": []}
     datasets = manifest.setdefault("datasets", [])

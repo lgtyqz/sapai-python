@@ -48,6 +48,7 @@ class SearchConfig:
     action_kind_prior_epsilon: float = 0.15
     battle_initial_simulations: int = 4
     battle_max_simulations: int = 16
+    first_play_urgency_reduction: float = 0.0
 
 
 @dataclass(slots=True)
@@ -132,6 +133,13 @@ class PolicyGuidedSearch:
 
     def _expand(self, node: Node, rng: random.Random, *, root: bool = False) -> float:
         actions = self.environment.legal_actions(node.state)
+        if node.state.gold > 0 and any(
+            action.kind is ActionKind.ROLL for action in actions
+        ):
+            # Spending otherwise-unused gold on one more roll cannot worsen the
+            # team or discard frozen offers. Ending early is therefore dominated
+            # and is excluded from policy/search targets while gold remains.
+            actions = [action for action in actions if action.kind is not ActionKind.END_TURN]
         if not actions:
             node.expanded = True
             node.value_prior = self._terminal_value(node.state)
@@ -312,10 +320,18 @@ class PolicyGuidedSearch:
         return rng.choice(list(edge.outcomes.values()))
 
     def _puct(self, node: Node, edge: Edge) -> float:
+        if edge.visits:
+            action_value = edge.value
+        else:
+            # Values are completion probabilities. Treating an unvisited edge
+            # as zero makes it look like a certain Arena loss and locks search
+            # onto the first sampled action. First-play urgency must start from
+            # the parent estimate on the same [0, 1] scale.
+            action_value = node.value - self.config.first_play_urgency_reduction
         exploration = (
             self.config.c_puct * edge.prior * math.sqrt(max(1, node.visits)) / (1 + edge.visits)
         )
-        return edge.value + exploration
+        return action_value + exploration
 
     @staticmethod
     def _terminal_value(state: RunState) -> float:

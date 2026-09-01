@@ -2,12 +2,12 @@ import random
 import unittest
 
 from sapai.data.replay import BoardSnapshot
-from sapai.search.stochastic import PolicyGuidedSearch, SearchConfig, UniformEvaluator
+from sapai.search.stochastic import Edge, Node, PolicyGuidedSearch, SearchConfig, UniformEvaluator
 from sapai.sim.actions import Action, ActionKind
 from sapai.sim.battle import BattleResult, BattleResultKind, BattleSimulator
 from sapai.sim.models import RunState, Shop, ShopPet, Team
 from sapai.sim.shop import ShopEnvironment
-from sapai.training.arena import RandomPolicy
+from sapai.training.arena import HeuristicPolicy, ModelPolicy, RandomPolicy
 from sapai.training.population import OpponentPopulation, SimulatorPopulationEvaluator
 from tests.helpers import catalog
 
@@ -67,6 +67,11 @@ class TrophyValueEvaluator:
         ]
 
 
+class EndTurnOnlyEvaluator:
+    def evaluate(self, state, actions):
+        return [float(action.kind is ActionKind.END_TURN) for action in actions], 0.5
+
+
 class SearchTest(unittest.TestCase):
     def test_candidate_budget_reserves_one_action_per_kind(self):
         environment = ShopEnvironment(catalog())
@@ -90,9 +95,12 @@ class SearchTest(unittest.TestCase):
         search.search(state, seed=3)
 
         root = search.transpositions[state.canonical_key()]
-        self.assertEqual({action.kind for action in root.edges}, kinds)
+        self.assertEqual(
+            {action.kind for action in root.edges},
+            kinds - {ActionKind.END_TURN},
+        )
 
-    def test_random_bootstrap_policy_can_cover_every_legal_action_kind(self):
+    def test_random_bootstrap_policy_covers_productive_actions_before_ending(self):
         actions = [Action(kind) for kind in ActionKind]
         policy = RandomPolicy()
         state = RunState(gold=10)
@@ -100,7 +108,58 @@ class SearchTest(unittest.TestCase):
             policy.choose(state, actions, random.Random(seed)).action.kind
             for seed in range(1000)
         }
-        self.assertEqual(selected, set(ActionKind))
+        self.assertEqual(selected, set(ActionKind) - {ActionKind.END_TURN})
+        self.assertEqual(
+            policy.choose(RunState(gold=0), actions, random.Random(0)).action.kind,
+            ActionKind.END_TURN,
+        )
+
+    def test_bootstrap_heuristic_spends_last_gold_before_ending(self):
+        actions = [Action(ActionKind.END_TURN), Action(ActionKind.ROLL)]
+
+        choice = HeuristicPolicy().choose(RunState(gold=1), actions, random.Random(0))
+
+        self.assertEqual(choice.action.kind, ActionKind.ROLL)
+
+    def test_model_policy_masks_premature_end_turn_even_if_model_demands_it(self):
+        actions = [Action(ActionKind.ROLL), Action(ActionKind.END_TURN)]
+
+        choice = ModelPolicy(EndTurnOnlyEvaluator()).choose(
+            RunState(gold=1), actions, random.Random(0)
+        )
+
+        self.assertEqual(choice.action.kind, ActionKind.ROLL)
+        self.assertEqual(choice.probabilities, [1.0, 0.0])
+
+    def test_first_play_urgency_uses_parent_value_scale(self):
+        search = PolicyGuidedSearch(
+            ShopEnvironment(catalog()),
+            UniformEvaluator(),
+            SearchConfig(c_puct=0.0, first_play_urgency_reduction=0.1),
+        )
+        node = Node(RunState(), visits=4, value_sum=2.4, value_prior=0.2)
+        edge = Edge(Action(ActionKind.ROLL), prior=0.5)
+
+        self.assertAlmostEqual(search._puct(node, edge), 0.5)
+
+    def test_search_excludes_end_turn_until_gold_is_spent(self):
+        environment = ShopEnvironment(catalog())
+        state = environment.reset(seed=5)
+        search = PolicyGuidedSearch(
+            environment,
+            UniformEvaluator(),
+            SearchConfig(
+                simulations=16,
+                candidate_actions=16,
+                max_depth=4,
+                gumbel_scale=0.0,
+            ),
+        )
+
+        result = search.search(state, seed=3)
+
+        self.assertNotIn(Action(ActionKind.END_TURN), result.visit_counts)
+        self.assertTrue(all(result.visit_counts.values()))
 
     def test_battle_leaf_resampling_grows_only_at_visit_thresholds(self):
         environment = ShopEnvironment(catalog())
