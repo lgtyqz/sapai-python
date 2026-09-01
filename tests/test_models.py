@@ -14,7 +14,7 @@ from sapai.ml.models import BattleModel, ModelConfig, PolicyValueModel, PolicyVa
 from sapai.ml.pipelines import _restore_training_checkpoint
 from sapai.ml.training import BattleTrainer
 from sapai.sim.actions import ActionKind
-from sapai.sim.models import Team
+from sapai.sim.models import Shop, ShopPet, Team
 from sapai.sim.shop import ShopEnvironment
 from tests.helpers import catalog
 
@@ -77,6 +77,31 @@ class TensorFlowModelTest(unittest.TestCase):
             tuple(encoded.action_order_entities[0, indexes[reorder], : len(reorder.order)]),
             reorder.order,
         )
+
+    def test_level_reward_shop_overflow_is_encoded_without_position_overflow(self):
+        ant = catalog().pet_by_name("Ant")
+        self.state.shop = Shop(
+            pets=[ShopPet(ant.create(instance_id=index)) for index in range(7)],
+            foods=[],
+        )
+        actions = self.environment.legal_actions(self.state)
+        freeze = next(
+            action
+            for action in actions
+            if action.kind is ActionKind.FREEZE_PET and action.source == 6
+        )
+
+        encoded = encode_states([self.state], [actions])
+        freeze_index = actions.index(freeze)
+        inputs = {
+            key: tf.convert_to_tensor(value) for key, value in encoded.as_dict().items()
+        }
+        outputs = PolicyValueModel(self.config)(inputs)
+
+        self.assertEqual(encoded.entity_ids.shape[1], 15)
+        self.assertEqual(encoded.action_source_entities[0, freeze_index], 11)
+        self.assertEqual(encoded.action_sources[0, freeze_index], 8)
+        self.assertEqual(tuple(outputs["policy_logits"].shape), (1, 256))
 
     def test_battle_model_forward(self):
         ant = catalog().pet_by_name("Ant").create()

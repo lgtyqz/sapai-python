@@ -246,7 +246,7 @@ python -m sapai.cli generate-arena \
   --boards data/boards.jsonl \
   --policy search \
   --policy-weights runs/policy-model \
-  --search-candidates 16 \
+  --search-candidates 8 \
   --search-simulations 32 \
   --battle-evaluation-simulations 16 \
   --episodes 250 \
@@ -271,10 +271,14 @@ hypothetical outcome is applied to a cloned Arena state, and the resulting
 next-turn states are evaluated together by the policy value head. Terminal
 outcomes use the exact Arena-completion target. Unvisited actions use the
 parent's completion estimate as their first-play value, rather than an
-out-of-scale zero. `END_TURN` is excluded from policy targets while a legal
-roll can spend remaining gold; the full legal action remains available to
-human players. These rules avoid both premature-turn policy collapse and the
-approximation error and training cost of a separate battle network.
+out-of-scale zero. `END_TURN` remains available at every gold value, allowing
+search to compare a purchase followed by battle against ending immediately
+without forcing the policy to roll down to zero. Deterministic policy choice
+first compares the combined probability of each action kind, then selects its
+best concrete source/target action; a singleton Roll therefore cannot beat a
+collectively preferred group of purchases. These rules avoid both premature
+turn and forced-roll policy collapse, as well as the approximation error and
+training cost of a separate battle network.
 `--battle-evaluation-simulations` controls the accuracy/cost tradeoff.
 
 Freeze choices are canonicalized once per shop roll: changing an offer's
@@ -290,11 +294,13 @@ python -m sapai.cli train-sequence \
   --workdir /content/drive/MyDrive/sapai-runs/run-001 \
   --pack Turtle \
   --bootstrap-episodes 1000 \
+  --bootstrap-exploration 0.10 \
   --bootstrap-epochs 20 \
   --search-episodes 250 \
   --search-epochs 5 \
   --search-iterations 3 \
-  --search-candidates 16 \
+  --search-candidates 8 \
+  --bootstrap-replay-fraction 0.35 \
   --battle-evaluation-simulations 16 \
   --validation-episodes 20 \
   --test-episodes 50 \
@@ -308,7 +314,11 @@ heuristic/exploratory mixture that covers every productive legal action kind
 before ending at zero gold. Each search iteration trains on the latest
 trajectories plus sampled older search and bootstrap replay. Fixed-seed
 validation Arena runs promote the best checkpoint; the test population is
-evaluated only after selection.
+evaluated only after selection. Promotion prioritizes standalone model Arena
+results, uses a shop-collapse penalty combining unspent End Turn gold,
+near-exclusive rolling, and too few purchases to break otherwise equal losing
+scores, and requires a strict improvement. Evaluation summaries include action
+counts and shop-behavior diagnostics.
 
 Outputs include immutable sequence/model manifests, model configs, rolling
 policy checkpoints, final and best weights, training histories, resumable
@@ -321,13 +331,14 @@ datasets and rollout episodes and restores model plus optimizer state from the
 latest epoch checkpoint. Only an epoch interrupted before its checkpoint is
 repeated.
 
-The v3 target schema and entity-conditioned action head are intentionally not
-checkpoint-compatible with earlier runs. V3 corrects the first-play value
-scale and removes dominated positive-gold `END_TURN` targets. Preserve old
-artifacts and choose a fresh run directory. Immutable manifests reject changed
-board hashes, source, rules, model contracts, and training settings instead of
-partially restoring. Subsequent interruptions of an unchanged v3 run resume
-normally.
+The v4 target schema and entity-conditioned action head are intentionally not
+checkpoint-compatible with earlier runs. V4 keeps the corrected first-play
+value scale, groups concrete action variants during policy choice, restores
+intentional positive-gold `END_TURN`, and records the chosen action for rollout
+diagnostics. Preserve old artifacts and choose a fresh run directory. Immutable
+manifests reject changed board hashes, source, rules, model contracts, and
+training settings instead of partially restoring. Subsequent interruptions of
+an unchanged v4 run resume normally.
 
 Keras optimizer slots are built before checkpoint restoration so model tensors
 tracked through Keras 3 optimizers are matched immediately. Each newly completed

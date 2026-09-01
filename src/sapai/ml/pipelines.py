@@ -109,7 +109,7 @@ def _write_run_metadata(
     else:
         if (output / "checkpoints").exists() or (output / "config.json").exists():
             raise ValueError(
-                f"legacy unversioned checkpoints found in {output}; use a new v3 output directory"
+                f"legacy unversioned checkpoints found in {output}; use a new v4 output directory"
             )
         manifest = {**immutable, "datasets": []}
     datasets = manifest.setdefault("datasets", [])
@@ -357,7 +357,12 @@ def _evaluate_battle(tf, model, examples, batch_size: int) -> dict[str, float]:
     }
 
 
-def _policy_batch(tf, decisions: list[ArenaDecision], max_actions: int):
+def _policy_batch(
+    tf,
+    decisions: list[ArenaDecision],
+    max_actions: int,
+    shop_pet_capacity: int | None = None,
+):
     try:
         import numpy as np
     except ModuleNotFoundError as error:  # pragma: no cover
@@ -366,6 +371,7 @@ def _policy_batch(tf, decisions: list[ArenaDecision], max_actions: int):
         [decision.state for decision in decisions],
         [decision.actions for decision in decisions],
         max_actions=max_actions,
+        shop_pet_capacity=shop_pet_capacity,
     )
     policy = np.zeros((len(decisions), max_actions), dtype=np.float32)
     for index, decision in enumerate(decisions):
@@ -408,6 +414,10 @@ def train_policy_model(
     validation = read_arena_decisions(validation_path) if validation_path else []
     if not train:
         raise ValueError("policy training dataset is empty")
+    shop_pet_capacity = max(
+        5,
+        max(len(decision.state.shop.pets) for decision in train + validation),
+    )
 
     output = Path(output_dir)
     _write_run_metadata(
@@ -425,7 +435,12 @@ def train_policy_model(
         clipnorm=5.0,
     )
     trainer = PolicyValueTrainer(model, optimizer)
-    sample_inputs, _ = _policy_batch(tf, train[:1], training.max_actions)
+    sample_inputs, _ = _policy_batch(
+        tf,
+        train[:1],
+        training.max_actions,
+        shop_pet_capacity,
+    )
     model(sample_inputs, training=False)
     optimizer.build(model.trainable_variables)
     completed_epochs = tf.Variable(0, dtype=tf.int64, trainable=False)
@@ -470,7 +485,12 @@ def train_policy_model(
         optimizer.learning_rate.assign(learning_rate)
         metrics: list[dict[str, float]] = []
         for batch in _batches(train, training.batch_size, rng):
-            inputs, targets = _policy_batch(tf, batch, training.max_actions)
+            inputs, targets = _policy_batch(
+                tf,
+                batch,
+                training.max_actions,
+                shop_pet_capacity,
+            )
             values = compiled_train_step(inputs, targets)
             metrics.append({key: float(value.numpy()) for key, value in values.items()})
         row = {"epoch": epoch + 1, "learning_rate": learning_rate, **_mean_metrics(metrics)}
@@ -482,6 +502,7 @@ def train_policy_model(
                     validation,
                     training.batch_size,
                     training.max_actions,
+                    shop_pet_capacity,
                 )
             )
         history.append(row)
@@ -512,15 +533,42 @@ def train_policy_model(
     }
 
 
-def _evaluate_policy(tf, model, examples, batch_size: int, max_actions: int):
+def _evaluate_policy(
+    tf,
+    model,
+    examples,
+    batch_size: int,
+    max_actions: int,
+    shop_pet_capacity: int,
+):
     rows: list[dict[str, float]] = []
     for start in range(0, len(examples), batch_size):
-        inputs, targets = _policy_batch(tf, examples[start : start + batch_size], max_actions)
+        inputs, targets = _policy_batch(
+            tf,
+            examples[start : start + batch_size],
+            max_actions,
+            shop_pet_capacity,
+        )
         outputs = model(inputs, training=False)
         policy_loss = tf.reduce_mean(
             tf.nn.softmax_cross_entropy_with_logits(
                 labels=targets["search_policy"], logits=outputs["policy_logits"]
             )
+        )
+        action_kind_membership = tf.one_hot(
+            inputs["action_kinds"],
+            depth=model.config_object.action_kinds,
+            dtype=tf.float32,
+        )
+        target_kind_policy = tf.einsum(
+            "ba,bak->bk",
+            targets["search_policy"],
+            action_kind_membership,
+        )
+        predicted_kind_policy = tf.einsum(
+            "ba,bak->bk",
+            tf.nn.softmax(outputs["policy_logits"]),
+            action_kind_membership,
         )
         value_loss = tf.reduce_mean(
             tf.keras.losses.huber(targets["run_value"], outputs["value"])
@@ -540,6 +588,17 @@ def _evaluate_policy(tf, model, examples, batch_size: int, max_actions: int):
             {
                 "validation_policy_loss": float(policy_loss.numpy()),
                 "validation_policy_accuracy": float(
+                    tf.reduce_mean(
+                        tf.cast(
+                            tf.equal(
+                                tf.argmax(target_kind_policy, axis=-1),
+                                tf.argmax(predicted_kind_policy, axis=-1),
+                            ),
+                            tf.float32,
+                        )
+                    ).numpy()
+                ),
+                "validation_concrete_action_accuracy": float(
                     tf.reduce_mean(
                         tf.cast(
                             tf.equal(

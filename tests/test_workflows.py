@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sapai.cli import _battle_dataset_for_sequence, _generate_episode_dataset
+from sapai.cli import (
+    _battle_dataset_for_sequence,
+    _generate_episode_dataset,
+    _policy_evaluation_score,
+)
 from sapai.data.datasets import split_boards
 from sapai.data.replay import BoardSnapshot
 from sapai.data.serialization import (
@@ -46,6 +50,24 @@ class CliWorkflowTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_checkpoint_score_rejects_shop_collapse_when_results_are_tied(self):
+        def evaluation(collapse_penalty):
+            return {
+                "model": {
+                    "completion_rate": 0.0,
+                    "mean_trophies": 0.0,
+                    "shop_behavior": {
+                        "shop_collapse_penalty": collapse_penalty,
+                    },
+                },
+                "search": {"completion_rate": 0.0, "mean_trophies": 0.0},
+            }
+
+        self.assertGreater(
+            _policy_evaluation_score(evaluation(0.0)),
+            _policy_evaluation_score(evaluation(1.0)),
+        )
 
 
 class DatasetWorkflowTest(unittest.TestCase):
@@ -242,6 +264,7 @@ class ArenaWorkflowTest(unittest.TestCase):
             pet_assets_created = (root / "sapai-assets" / "Pets").is_dir()
         self.assertEqual(len(loaded), len(run.decisions))
         self.assertEqual(loaded[0].actions, run.decisions[0].actions)
+        self.assertEqual(loaded[0].chosen_action, run.decisions[0].chosen_action)
         self.assertNotIn("data:image/png;base64", html)
         self.assertIn("Super Auto Pets Arena run", html)
         self.assertIn('href="sapai.css"', html)

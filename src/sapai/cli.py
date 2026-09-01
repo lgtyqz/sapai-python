@@ -82,7 +82,7 @@ def _add_arena_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-decisions-per-turn", type=int, default=30)
     parser.add_argument("--search-simulations", type=int, default=32)
-    parser.add_argument("--search-candidates", type=int, default=16)
+    parser.add_argument("--search-candidates", type=int, default=8)
     parser.add_argument(
         "--battle-evaluation-simulations",
         type=int,
@@ -188,15 +188,15 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument("--test-episodes", type=int, default=16)
     sequence.add_argument("--bootstrap-episodes", type=int, default=100)
     sequence.add_argument("--bootstrap-epochs", type=int, default=10)
-    sequence.add_argument("--bootstrap-exploration", type=float, default=0.25)
+    sequence.add_argument("--bootstrap-exploration", type=float, default=0.10)
     sequence.add_argument("--search-episodes", type=int, default=50)
     sequence.add_argument("--search-epochs", type=int, default=5)
     sequence.add_argument("--search-iterations", type=int, default=3)
-    sequence.add_argument("--bootstrap-replay-fraction", type=float, default=0.15)
+    sequence.add_argument("--bootstrap-replay-fraction", type=float, default=0.35)
     sequence.add_argument("--batch-size", type=int, default=64)
     sequence.add_argument("--seed", type=int, default=0)
     sequence.add_argument("--search-simulations", type=int, default=32)
-    sequence.add_argument("--search-candidates", type=int, default=16)
+    sequence.add_argument("--search-candidates", type=int, default=8)
     sequence.add_argument("--battle-evaluation-simulations", type=int, default=8)
     sequence.add_argument(
         "--progress",
@@ -232,7 +232,7 @@ def _model_config_from_weights(weights: str | Path) -> tuple[ModelConfig, Path]:
     manifest_path = directory / "run-manifest.json"
     if not manifest_path.exists():
         raise ValueError(
-            f"unversioned policy weights in {directory}; regenerate them with the v3 pipeline"
+            f"unversioned policy weights in {directory}; regenerate them with the v4 pipeline"
         )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (
@@ -241,7 +241,7 @@ def _model_config_from_weights(weights: str | Path) -> tuple[ModelConfig, Path]:
         or manifest.get("target_schema") != POLICY_TARGET_SCHEMA
     ):
         raise ValueError(
-            f"incompatible policy checkpoint contract in {manifest_path}; use v3 weights"
+            f"incompatible policy checkpoint contract in {manifest_path}; use v4 weights"
         )
     config_path = directory / "config.json"
     if config_path.exists():
@@ -406,7 +406,7 @@ def _generate_episode_dataset(
     episode_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = episode_dir / "manifest.json"
     manifest = {
-        "format": "sapai-arena-episodes-v3",
+        "format": "sapai-arena-episodes-v4",
         "target_schema": POLICY_TARGET_SCHEMA,
         "pack": pack,
         "version": version,
@@ -587,6 +587,25 @@ def _training_progress_logger() -> Callable[[str, Mapping[str, object]], None]:
     return report
 
 
+def _policy_evaluation_score(evaluation: Mapping[str, object]) -> tuple[float, ...]:
+    """Rank checkpoints by model play, then search play, rejecting roll collapse."""
+
+    model = evaluation["model"]
+    search = evaluation["search"]
+    if not isinstance(model, Mapping) or not isinstance(search, Mapping):
+        raise TypeError("invalid policy evaluation")
+    behavior = model["shop_behavior"]
+    if not isinstance(behavior, Mapping):
+        raise TypeError("invalid model shop-behavior evaluation")
+    return (
+        float(model["completion_rate"]),
+        float(model["mean_trophies"]),
+        -float(behavior["shop_collapse_penalty"]),
+        float(search["completion_rate"]),
+        float(search["mean_trophies"]),
+    )
+
+
 def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     from sapai.ml.pipelines import train_policy_model
 
@@ -619,7 +638,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     boards_sha256 = _file_sha256(args.boards)
     simulator = BattleSimulator(catalog)
     sequence_manifest = {
-        "format": "sapai-training-sequence-v3",
+        "format": "sapai-training-sequence-v4",
         "objective": VALUE_OBJECTIVE,
         "target_schema": POLICY_TARGET_SCHEMA,
         "boards_sha256": boards_sha256,
@@ -677,7 +696,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         ]
         if existing_outputs:
             raise ValueError(
-                f"legacy or unversioned training outputs found in {root}; use a new v3 workdir"
+                f"legacy or unversioned training outputs found in {root}; use a new v4 workdir"
             )
         _atomic_json(sequence_manifest_path, sequence_manifest)
     populations = split_opponent_populations(
@@ -801,12 +820,6 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             )
         return evaluated
 
-    def score(evaluation: Mapping[str, object]) -> tuple[float, float]:
-        search = evaluation["search"]
-        if not isinstance(search, Mapping):
-            raise TypeError("invalid search evaluation")
-        return float(search["completion_rate"]), float(search["mean_trophies"])
-
     bootstrap_evaluation_path = evaluation_dir / "bootstrap.json"
     if bootstrap_evaluation_path.exists():
         bootstrap_evaluation = json.loads(
@@ -831,7 +844,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         _atomic_copy(policy_dir / "policy.weights.h5", best_weights)
         best = {
             "stage": "bootstrap",
-            "score": list(score(bootstrap_evaluation)),
+            "score": list(_policy_evaluation_score(bootstrap_evaluation)),
             "weights_sha256": _file_sha256(best_weights),
         }
         _atomic_json(best_path, best)
@@ -925,9 +938,9 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
                 include_heuristic=False,
             )
             _atomic_json(evaluation_path, evaluation)
-        candidate_score = score(evaluation)
+        candidate_score = _policy_evaluation_score(evaluation)
         best_score = tuple(float(item) for item in best["score"])
-        promoted = candidate_score >= best_score
+        promoted = candidate_score > best_score
         if promoted:
             _atomic_copy(policy_dir / "policy.weights.h5", best_weights)
             best = {
@@ -962,7 +975,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         )
         _atomic_json(final_test_path, final_test)
     summary = {
-        "format": "sapai-training-sequence-v3",
+        "format": "sapai-training-sequence-v4",
         "objective": VALUE_OBJECTIVE,
         "target_schema": POLICY_TARGET_SCHEMA,
         "boards_sha256": boards_sha256,

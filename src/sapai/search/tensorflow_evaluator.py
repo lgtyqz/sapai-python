@@ -15,6 +15,7 @@ class TensorFlowEvaluator:
             raise RuntimeError("install the 'ml' extra to evaluate TensorFlow models") from error
         self.model = model
         self.max_actions = max_actions
+        self.shop_pet_capacity = 5
         self._predict = tf.function(
             lambda inputs: self.model(inputs, training=False),
             reduce_retracing=True,
@@ -37,7 +38,16 @@ class TensorFlowEvaluator:
             raise RuntimeError("install the 'ml' extra to evaluate TensorFlow models") from error
         if len(states) != len(actions):
             raise ValueError("states and actions must have equal length")
-        encoded = encode_states(states, actions, max_actions=self.max_actions)
+        self.shop_pet_capacity = max(
+            self.shop_pet_capacity,
+            max((len(state.shop.pets) for state in states), default=0),
+        )
+        encoded = encode_states(
+            states,
+            actions,
+            max_actions=self.max_actions,
+            shop_pet_capacity=self.shop_pet_capacity,
+        )
         inputs = {key: tf.convert_to_tensor(value) for key, value in encoded.as_dict().items()}
         outputs = self._predict(inputs)
         results = []

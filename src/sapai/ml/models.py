@@ -7,7 +7,7 @@ try:  # TensorFlow is optional for simulator-only installations.
 except ModuleNotFoundError:  # pragma: no cover - exercised without ML extra
     tf = None
 
-MODEL_SCHEMA_VERSION = 2
+MODEL_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +21,7 @@ class ModelConfig:
     ff_dim: int = 640
     dropout: float = 0.1
     action_kinds: int = 16
-    action_positions: int = 8
+    action_positions: int = 256
 
 
 if tf is not None:

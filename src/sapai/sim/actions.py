@@ -19,6 +19,22 @@ class ActionKind(IntEnum):
     REORDER = 11
 
 
+ACTION_KIND_EXPLORATION_WEIGHTS = {
+    ActionKind.BUY_MERGE_PET: 6.0,
+    ActionKind.MERGE_BOARD_PET: 5.0,
+    ActionKind.BUY_PET: 4.0,
+    ActionKind.BUY_FOOD: 3.0,
+    ActionKind.ROLL: 2.0,
+    ActionKind.END_TURN: 1.0,
+    ActionKind.FREEZE_PET: 0.5,
+    ActionKind.FREEZE_FOOD: 0.5,
+    ActionKind.SELL_PET: 0.25,
+    ActionKind.UNFREEZE_PET: 0.25,
+    ActionKind.UNFREEZE_FOOD: 0.25,
+    ActionKind.REORDER: 0.25,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Action:
     kind: ActionKind

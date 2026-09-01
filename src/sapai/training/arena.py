@@ -22,7 +22,7 @@ from sapai.rewards import (
     normalized_trophies,
 )
 from sapai.search.stochastic import PolicyGuidedSearch
-from sapai.sim.actions import Action, ActionKind
+from sapai.sim.actions import ACTION_KIND_EXPLORATION_WEIGHTS, Action, ActionKind
 from sapai.sim.battle import BattleResult, BattleResultKind, BattleSimulator
 from sapai.sim.models import BattleOutcome, RunState
 from sapai.sim.shop import ShopEnvironment
@@ -68,7 +68,7 @@ class HeuristicPolicy:
 
 
 class RandomPolicy:
-    """A loop-safe, action-kind-balanced exploratory policy."""
+    """A loop-safe exploratory policy weighted toward productive spending."""
 
     def choose(
         self, state: RunState, actions: list[Action], rng: random.Random
@@ -83,7 +83,12 @@ class RandomPolicy:
                 if candidate.kind is ActionKind.END_TURN:
                     continue
                 by_kind.setdefault(candidate.kind, []).append(candidate)
-            chosen_kind = rng.choice(list(by_kind))
+            kinds = list(by_kind)
+            chosen_kind = rng.choices(
+                kinds,
+                weights=[ACTION_KIND_EXPLORATION_WEIGHTS[kind] for kind in kinds],
+                k=1,
+            )[0]
             action = rng.choice(by_kind[chosen_kind])
         probabilities = [float(candidate == action) for candidate in actions]
         return PolicyChoice(action, probabilities)
@@ -126,26 +131,29 @@ class ModelPolicy:
     ) -> PolicyChoice:
         probabilities, _ = self.evaluator.evaluate(state, actions)
         probabilities = list(probabilities)
-        if state.gold > 0 and any(action.kind is ActionKind.ROLL for action in actions):
-            for index, action in enumerate(actions):
-                if action.kind is ActionKind.END_TURN:
-                    probabilities[index] = 0.0
-            total = sum(probabilities)
-            if total <= 0:
-                allowed = [
-                    index
-                    for index, action in enumerate(actions)
-                    if action.kind is not ActionKind.END_TURN
-                ]
-                probabilities = [0.0] * len(actions)
-                for index in allowed:
-                    probabilities[index] = 1.0 / len(allowed)
-            else:
-                probabilities = [value / total for value in probabilities]
         if self.sample:
             action = rng.choices(actions, weights=probabilities, k=1)[0]
         else:
-            action = actions[max(range(len(actions)), key=probabilities.__getitem__)]
+            # Search targets distribute one strategic choice across all of its
+            # concrete source/target variants. Compare the total mass for each
+            # action kind first so singleton actions such as Roll and End Turn
+            # do not beat a collectively preferred set of purchases.
+            mass_by_kind: dict[ActionKind, float] = {}
+            for candidate, probability in zip(actions, probabilities, strict=True):
+                mass_by_kind[candidate.kind] = (
+                    mass_by_kind.get(candidate.kind, 0.0) + probability
+                )
+            chosen_kind = max(
+                mass_by_kind,
+                key=lambda kind: (mass_by_kind[kind], -int(kind)),
+            )
+            candidates = [
+                index
+                for index, candidate in enumerate(actions)
+                if candidate.kind is chosen_kind
+            ]
+            selected = max(candidates, key=probabilities.__getitem__)
+            action = actions[selected]
         return PolicyChoice(action, probabilities)
 
 
@@ -172,6 +180,7 @@ class ArenaDecision:
     state: RunState
     actions: list[Action]
     search_policy: list[float]
+    chosen_action: Action
     next_battle_after_policy: tuple[float, float, float] = (0.0, 1.0, 0.0)
     run_value: float = 0.0
     expected_trophies: float = 0.0
@@ -258,7 +267,10 @@ class ArenaRunner:
                 else:
                     choice = self.policy.choose(state, actions, rng)
                 decision = ArenaDecision(
-                    state.clone(), list(actions), list(choice.probabilities)
+                    state=state.clone(),
+                    actions=list(actions),
+                    search_policy=list(choice.probabilities),
+                    chosen_action=choice.action,
                 )
                 decisions.append(decision)
                 turn_decisions.append(decision)
@@ -326,6 +338,7 @@ def decision_to_dict(decision: ArenaDecision) -> dict[str, object]:
         "next_battle_after_policy": list(decision.next_battle_after_policy),
         "run_value": decision.run_value,
         "expected_trophies": decision.expected_trophies,
+        "chosen_action": action_to_dict(decision.chosen_action),
     }
 
 
@@ -334,7 +347,7 @@ def decision_from_dict(value: dict[str, object]) -> ArenaDecision:
     if schema != POLICY_TARGET_SCHEMA:
         raise ValueError(
             f"policy target schema mismatch: expected {POLICY_TARGET_SCHEMA!r}, got {schema!r}; "
-            "regenerate Arena trajectories for the completion-probability objective"
+            "regenerate Arena trajectories for the current action-choice contract"
         )
     return ArenaDecision(
         state=run_state_from_dict(value["state"]),  # type: ignore[arg-type]
@@ -345,6 +358,7 @@ def decision_from_dict(value: dict[str, object]) -> ArenaDecision:
         ),
         run_value=float(value["run_value"]),
         expected_trophies=float(value["expected_trophies"]),
+        chosen_action=action_from_dict(value["chosen_action"]),  # type: ignore[arg-type]
     )
 
 
@@ -371,10 +385,17 @@ def evaluate_arena_policy(
     trophies: list[int] = []
     turns: list[int] = []
     outcomes = {"win": 0, "draw": 0, "loss": 0}
+    action_counts: dict[str, int] = {}
+    end_turn_gold: list[int] = []
     for episode in range(episodes):
         result = runner.run(pack=pack, version=version, seed=seed + episode)
         trophies.append(result.final_state.trophies)
         turns.append(result.final_state.turn)
+        for decision in result.decisions:
+            kind = decision.chosen_action.kind.name
+            action_counts[kind] = action_counts.get(kind, 0) + 1
+            if decision.chosen_action.kind is ActionKind.END_TURN:
+                end_turn_gold.append(decision.state.gold)
         for outcome in result.battle_outcomes:
             if outcome is BattleResultKind.PLAYER_WIN:
                 outcomes["win"] += 1
@@ -383,12 +404,42 @@ def evaluate_arena_policy(
             else:
                 outcomes["draw"] += 1
     battles = sum(outcomes.values())
+    rolls = action_counts.get(ActionKind.ROLL.name, 0)
+    purchases = sum(
+        action_counts.get(kind.name, 0)
+        for kind in (
+            ActionKind.BUY_PET,
+            ActionKind.BUY_MERGE_PET,
+            ActionKind.BUY_FOOD,
+        )
+    )
+    spending_actions = rolls + purchases
+    mean_purchases_per_turn = purchases / battles if battles else 0.0
+    roll_spend_fraction = rolls / spending_actions if spending_actions else 0.0
+    mean_unspent_gold = statistics.fmean(end_turn_gold) if end_turn_gold else 0.0
+    shop_collapse_penalty = (
+        min(1.0, mean_unspent_gold / 10.0)
+        + max(0.0, (roll_spend_fraction - 0.75) / 0.25)
+        + max(0.0, 1.0 - mean_purchases_per_turn)
+    )
     return {
         "episodes": episodes,
         "completion_rate": sum(value >= 10 for value in trophies) / episodes,
         "mean_trophies": statistics.fmean(trophies),
         "median_trophies": statistics.median(trophies),
         "mean_turns": statistics.fmean(turns),
+        "action_counts": dict(sorted(action_counts.items())),
+        "shop_behavior": {
+            "mean_decisions_per_turn": (
+                sum(action_counts.values()) / battles if battles else 0.0
+            ),
+            "mean_rolls_per_turn": rolls / battles if battles else 0.0,
+            "mean_purchases_per_turn": mean_purchases_per_turn,
+            "roll_spend_fraction": roll_spend_fraction,
+            "positive_gold_end_turns": sum(gold > 0 for gold in end_turn_gold),
+            "mean_unspent_gold_at_end_turn": mean_unspent_gold,
+            "shop_collapse_penalty": shop_collapse_penalty,
+        },
         "battle_rates": {
             name: count / battles if battles else 0.0 for name, count in outcomes.items()
         },

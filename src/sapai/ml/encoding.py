@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from sapai.sim.actions import Action, ActionKind
 from sapai.sim.models import RunState, Shop, Team
 
-MAX_ENTITIES = 13  # 5 team + 5 shop pets + 2 foods + 1 global token
+TEAM_SLOTS = 5
+BASE_SHOP_PET_SLOTS = 5
+SHOP_FOOD_SLOTS = 2
 ENTITY_FEATURES = 12
 
 
@@ -44,6 +46,7 @@ def encode_states(
     legal_actions: Sequence[Sequence[Action]],
     *,
     max_actions: int = 256,
+    shop_pet_capacity: int | None = None,
     id_buckets: int = 2048,
     perk_buckets: int = 256,
 ) -> EncodedBatch:
@@ -59,19 +62,32 @@ def encode_states(
         raise RuntimeError("install the 'ml' extra to encode model batches") from error
 
     batch = len(states)
-    ids = np.zeros((batch, MAX_ENTITIES), dtype=np.int32)
-    types = np.zeros((batch, MAX_ENTITIES), dtype=np.int32)
-    perks = np.zeros((batch, MAX_ENTITIES), dtype=np.int32)
-    features = np.zeros((batch, MAX_ENTITIES, ENTITY_FEATURES), dtype=np.float32)
-    mask = np.zeros((batch, MAX_ENTITIES), dtype=bool)
+    required_shop_pet_slots = max(
+        BASE_SHOP_PET_SLOTS,
+        max((len(state.shop.pets) for state in states), default=0),
+    )
+    if shop_pet_capacity is not None and shop_pet_capacity < required_shop_pet_slots:
+        raise ValueError(
+            f"shop_pet_capacity={shop_pet_capacity} cannot encode "
+            f"{required_shop_pet_slots} shop pets"
+        )
+    shop_pet_slots = shop_pet_capacity or required_shop_pet_slots
+    entity_count = TEAM_SLOTS + shop_pet_slots + SHOP_FOOD_SLOTS + 1
+    global_entity = entity_count - 1
+    food_entity_start = TEAM_SLOTS + shop_pet_slots
+    ids = np.zeros((batch, entity_count), dtype=np.int32)
+    types = np.zeros((batch, entity_count), dtype=np.int32)
+    perks = np.zeros((batch, entity_count), dtype=np.int32)
+    features = np.zeros((batch, entity_count, ENTITY_FEATURES), dtype=np.float32)
+    mask = np.zeros((batch, entity_count), dtype=bool)
     kinds = np.zeros((batch, max_actions), dtype=np.int32)
     sources = np.zeros((batch, max_actions), dtype=np.int32)
     targets = np.zeros((batch, max_actions), dtype=np.int32)
     orders = np.zeros((batch, max_actions, 5), dtype=np.int32)
-    source_entities = np.full((batch, max_actions), MAX_ENTITIES - 1, dtype=np.int32)
-    target_entities = np.full((batch, max_actions), MAX_ENTITIES - 1, dtype=np.int32)
+    source_entities = np.full((batch, max_actions), global_entity, dtype=np.int32)
+    target_entities = np.full((batch, max_actions), global_entity, dtype=np.int32)
     order_entities = np.full(
-        (batch, max_actions, 5), MAX_ENTITIES - 1, dtype=np.int32
+        (batch, max_actions, TEAM_SLOTS), global_entity, dtype=np.int32
     )
     action_mask = np.zeros((batch, max_actions), dtype=bool)
 
@@ -86,7 +102,7 @@ def encode_states(
                 mask[batch_index, entity_index] = True
             entity_index += 1
 
-        for position in range(5):
+        for position in range(shop_pet_slots):
             if position < len(state.shop.pets):
                 offer = state.shop.pets[position]
                 pet = offer.pet
@@ -98,7 +114,7 @@ def encode_states(
                 mask[batch_index, entity_index] = True
             entity_index += 1
 
-        for position in range(2):
+        for position in range(SHOP_FOOD_SLOTS):
             if position < len(state.shop.foods):
                 food = state.shop.foods[position]
                 ids[batch_index, entity_index] = 1 + food.id % (id_buckets - 1)
@@ -143,13 +159,13 @@ def encode_states(
                 ActionKind.FREEZE_PET,
                 ActionKind.UNFREEZE_PET,
             }:
-                source_entities[batch_index, action_index] = 5 + action.source
+                source_entities[batch_index, action_index] = TEAM_SLOTS + action.source
             elif action.kind in {
                 ActionKind.BUY_FOOD,
                 ActionKind.FREEZE_FOOD,
                 ActionKind.UNFREEZE_FOOD,
             }:
-                source_entities[batch_index, action_index] = 10 + action.source
+                source_entities[batch_index, action_index] = food_entity_start + action.source
             elif action.kind in {ActionKind.SELL_PET, ActionKind.MERGE_BOARD_PET}:
                 source_entities[batch_index, action_index] = action.source
             if action.kind in {

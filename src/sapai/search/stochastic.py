@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from sapai.rewards import arena_run_value
-from sapai.sim.actions import Action, ActionKind
+from sapai.sim.actions import ACTION_KIND_EXPLORATION_WEIGHTS, Action, ActionKind
 from sapai.sim.models import RunState
 from sapai.sim.shop import ShopEnvironment
 
@@ -39,7 +39,7 @@ class UniformEvaluator:
 @dataclass(slots=True)
 class SearchConfig:
     simulations: int = 32
-    candidate_actions: int = 16
+    candidate_actions: int = 8
     max_depth: int = 15
     c_puct: float = 1.5
     progressive_widening_c: float = 1.0
@@ -115,7 +115,22 @@ class PolicyGuidedSearch:
             raise ValueError("cannot search a state with no legal actions")
         for _ in range(self.config.simulations):
             self._simulate(root, rng, seen=set(), depth=0)
-        best = max(root.edges.values(), key=lambda edge: (edge.visits, edge.value))
+        by_kind: dict[ActionKind, list[Edge]] = {}
+        for edge in root.edges.values():
+            by_kind.setdefault(edge.action.kind, []).append(edge)
+        chosen_kind = max(
+            by_kind,
+            key=lambda kind: (
+                sum(edge.visits for edge in by_kind[kind]),
+                max(edge.value for edge in by_kind[kind]),
+                sum(edge.prior for edge in by_kind[kind]),
+                -int(kind),
+            ),
+        )
+        best = max(
+            by_kind[chosen_kind],
+            key=lambda edge: (edge.visits, edge.value, edge.prior),
+        )
         return SearchResult(
             action=best.action,
             visit_counts={edge.action: edge.visits for edge in root.edges.values()},
@@ -133,13 +148,6 @@ class PolicyGuidedSearch:
 
     def _expand(self, node: Node, rng: random.Random, *, root: bool = False) -> float:
         actions = self.environment.legal_actions(node.state)
-        if node.state.gold > 0 and any(
-            action.kind is ActionKind.ROLL for action in actions
-        ):
-            # Spending otherwise-unused gold on one more roll cannot worsen the
-            # team or discard frozen offers. Ending early is therefore dominated
-            # and is excluded from policy/search targets while gold remains.
-            actions = [action for action in actions if action.kind is not ActionKind.END_TURN]
         if not actions:
             node.expanded = True
             node.value_prior = self._terminal_value(node.state)
@@ -156,11 +164,16 @@ class PolicyGuidedSearch:
         by_kind: dict[ActionKind, list[int]] = {}
         for index, action in enumerate(actions):
             by_kind.setdefault(action.kind, []).append(index)
-        kind_probability = 1.0 / len(by_kind)
+        kind_weight_total = sum(
+            ACTION_KIND_EXPLORATION_WEIGHTS[kind] for kind in by_kind
+        )
         epsilon = min(1.0, max(0.0, self.config.action_kind_prior_epsilon))
         normalized = [
             (1.0 - epsilon) * prior
-            + epsilon * kind_probability / len(by_kind[action.kind])
+            + epsilon
+            * ACTION_KIND_EXPLORATION_WEIGHTS[action.kind]
+            / kind_weight_total
+            / len(by_kind[action.kind])
             for action, prior in zip(actions, normalized, strict=True)
         ]
 

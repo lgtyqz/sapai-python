@@ -72,6 +72,16 @@ class EndTurnOnlyEvaluator:
         return [float(action.kind is ActionKind.END_TURN) for action in actions], 0.5
 
 
+class SplitPurchaseEvaluator:
+    def evaluate(self, state, actions):
+        probabilities = {
+            ActionKind.BUY_PET: 0.2,
+            ActionKind.ROLL: 0.3,
+            ActionKind.END_TURN: 0.1,
+        }
+        return [probabilities[action.kind] for action in actions], 0.5
+
+
 class SearchTest(unittest.TestCase):
     def test_candidate_budget_reserves_one_action_per_kind(self):
         environment = ShopEnvironment(catalog())
@@ -95,10 +105,7 @@ class SearchTest(unittest.TestCase):
         search.search(state, seed=3)
 
         root = search.transpositions[state.canonical_key()]
-        self.assertEqual(
-            {action.kind for action in root.edges},
-            kinds - {ActionKind.END_TURN},
-        )
+        self.assertEqual({action.kind for action in root.edges}, kinds)
 
     def test_random_bootstrap_policy_covers_productive_actions_before_ending(self):
         actions = [Action(kind) for kind in ActionKind]
@@ -121,15 +128,30 @@ class SearchTest(unittest.TestCase):
 
         self.assertEqual(choice.action.kind, ActionKind.ROLL)
 
-    def test_model_policy_masks_premature_end_turn_even_if_model_demands_it(self):
+    def test_model_policy_allows_an_intentional_positive_gold_end_turn(self):
         actions = [Action(ActionKind.ROLL), Action(ActionKind.END_TURN)]
 
         choice = ModelPolicy(EndTurnOnlyEvaluator()).choose(
             RunState(gold=1), actions, random.Random(0)
         )
 
-        self.assertEqual(choice.action.kind, ActionKind.ROLL)
-        self.assertEqual(choice.probabilities, [1.0, 0.0])
+        self.assertEqual(choice.action.kind, ActionKind.END_TURN)
+        self.assertEqual(choice.probabilities, [0.0, 1.0])
+
+    def test_model_policy_groups_purchase_targets_before_comparing_with_roll(self):
+        actions = [
+            Action(ActionKind.BUY_PET, 0, 0),
+            Action(ActionKind.BUY_PET, 0, 1),
+            Action(ActionKind.BUY_PET, 0, 2),
+            Action(ActionKind.ROLL),
+            Action(ActionKind.END_TURN),
+        ]
+
+        choice = ModelPolicy(SplitPurchaseEvaluator()).choose(
+            RunState(gold=10), actions, random.Random(0)
+        )
+
+        self.assertEqual(choice.action.kind, ActionKind.BUY_PET)
 
     def test_first_play_urgency_uses_parent_value_scale(self):
         search = PolicyGuidedSearch(
@@ -142,7 +164,7 @@ class SearchTest(unittest.TestCase):
 
         self.assertAlmostEqual(search._puct(node, edge), 0.5)
 
-    def test_search_excludes_end_turn_until_gold_is_spent(self):
+    def test_search_keeps_end_turn_available_with_positive_gold(self):
         environment = ShopEnvironment(catalog())
         state = environment.reset(seed=5)
         search = PolicyGuidedSearch(
@@ -158,8 +180,32 @@ class SearchTest(unittest.TestCase):
 
         result = search.search(state, seed=3)
 
-        self.assertNotIn(Action(ActionKind.END_TURN), result.visit_counts)
+        self.assertIn(Action(ActionKind.END_TURN), result.visit_counts)
         self.assertTrue(all(result.visit_counts.values()))
+
+    def test_search_acts_on_collective_purchase_visits_instead_of_singleton_roll(self):
+        environment = ShopEnvironment(catalog())
+        state = environment.reset(seed=5)
+        search = PolicyGuidedSearch(
+            environment,
+            UniformEvaluator(),
+            SearchConfig(
+                simulations=32,
+                candidate_actions=8,
+                max_depth=8,
+                gumbel_scale=0.0,
+            ),
+        )
+
+        result = search.search(state, seed=3)
+
+        self.assertEqual(result.action.kind, ActionKind.BUY_PET)
+        buy_visits = sum(
+            count
+            for action, count in result.visit_counts.items()
+            if action.kind is ActionKind.BUY_PET
+        )
+        self.assertGreater(buy_visits, result.visit_counts[Action(ActionKind.ROLL)])
 
     def test_battle_leaf_resampling_grows_only_at_visit_thresholds(self):
         environment = ShopEnvironment(catalog())
