@@ -7,8 +7,10 @@ from pathlib import Path
 
 from sapai.cli import (
     _battle_dataset_for_sequence,
+    _completed_iteration_records,
     _generate_episode_dataset,
     _policy_evaluation_score,
+    _prepare_sequence_manifest,
 )
 from sapai.data.datasets import split_boards
 from sapai.data.replay import BoardSnapshot
@@ -68,6 +70,118 @@ class CliWorkflowTest(unittest.TestCase):
             _policy_evaluation_score(evaluation(0.0)),
             _policy_evaluation_score(evaluation(1.0)),
         )
+
+    def test_sequence_manifest_allows_monotonic_continuation_and_code_updates(self):
+        def manifest(source, commit, iterations):
+            return {
+                "format": "sapai-training-sequence-v5",
+                "objective": "test",
+                "target_schema": "test-v1",
+                "boards_sha256": "boards",
+                "source_sha256": source,
+                "repository_commit": commit,
+                "catalog_sha256": "catalog",
+                "rules_sha256": "rules",
+                "simulator": {"max_rounds": 100},
+                "settings": {
+                    "pack": "Turtle",
+                    "seed": 7,
+                    "search_iterations": iterations,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sequence-manifest.json"
+            _prepare_sequence_manifest(
+                path,
+                manifest("source-a", "commit-a", 3),
+                requested_iterations=3,
+                completed_iterations=3,
+            )
+            continued = _prepare_sequence_manifest(
+                path,
+                manifest("source-b", "commit-b", 6),
+                requested_iterations=6,
+                completed_iterations=3,
+            )
+
+            self.assertEqual(
+                continued["continuation"]["requested_search_iterations"], 6
+            )
+            self.assertEqual(len(continued["code_versions"]), 2)
+            with self.assertRaisesRegex(ValueError, "cannot be reduced"):
+                _prepare_sequence_manifest(
+                    path,
+                    manifest("source-b", "commit-b", 5),
+                    requested_iterations=5,
+                    completed_iterations=3,
+                )
+            with self.assertRaisesRegex(ValueError, "immutable settings changed"):
+                changed = manifest("source-b", "commit-b", 7)
+                changed["settings"]["seed"] = 8
+                _prepare_sequence_manifest(
+                    path,
+                    changed,
+                    requested_iterations=7,
+                    completed_iterations=3,
+                )
+
+    def test_v4_sequence_manifest_migrates_without_discarding_prior_outputs(self):
+        legacy = {
+            "format": "sapai-training-sequence-v4",
+            "objective": "test",
+            "target_schema": "test-v1",
+            "boards_sha256": "boards",
+            "source_sha256": "old-source",
+            "repository_commit": "old-commit",
+            "catalog_sha256": "catalog",
+            "rules_sha256": "rules",
+            "simulator": {"max_rounds": 100},
+            "settings": {
+                "pack": "Turtle",
+                "seed": 7,
+                "search_iterations": 3,
+            },
+        }
+        desired = {
+            **legacy,
+            "format": "sapai-training-sequence-v5",
+            "source_sha256": "new-source",
+            "repository_commit": "new-commit",
+            "settings": {**legacy["settings"], "search_iterations": 6},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sequence-manifest.json"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            migrated = _prepare_sequence_manifest(
+                path,
+                desired,
+                requested_iterations=6,
+                completed_iterations=3,
+            )
+
+        self.assertEqual(migrated["format"], "sapai-training-sequence-v5")
+        self.assertEqual(migrated["created_with"]["repository_commit"], "old-commit")
+        self.assertEqual(migrated["continuation"]["requested_search_iterations"], 6)
+
+    def test_iteration_state_extends_an_older_summary_after_an_interruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "summary.json").write_text(
+                json.dumps({"iterations": [{"iteration": 1, "source": "summary"}]}),
+                encoding="utf-8",
+            )
+            state = root / "iteration-state"
+            state.mkdir()
+            (state / "000002.json").write_text(
+                json.dumps({"iteration": 2, "source": "atomic-state"}),
+                encoding="utf-8",
+            )
+
+            records = _completed_iteration_records(root)
+
+        self.assertEqual([record["iteration"] for record in records], [1, 2])
+        self.assertEqual(records[1]["source"], "atomic-state")
 
 
 class DatasetWorkflowTest(unittest.TestCase):

@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     from sapai.ml.models import ModelConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TRAINING_SEQUENCE_FORMAT = "sapai-training-sequence-v5"
+LEGACY_TRAINING_SEQUENCE_FORMATS = {"sapai-training-sequence-v4"}
 
 
 def _default_path(environment: str, relative: str) -> str:
@@ -191,7 +193,15 @@ def build_parser() -> argparse.ArgumentParser:
     sequence.add_argument("--bootstrap-exploration", type=float, default=0.10)
     sequence.add_argument("--search-episodes", type=int, default=50)
     sequence.add_argument("--search-epochs", type=int, default=5)
-    sequence.add_argument("--search-iterations", type=int, default=3)
+    sequence.add_argument(
+        "--search-iterations",
+        type=int,
+        default=3,
+        help=(
+            "total search iterations desired in this workdir; increase this value to "
+            "continue a completed run"
+        ),
+    )
     sequence.add_argument("--bootstrap-replay-fraction", type=float, default=0.35)
     sequence.add_argument("--batch-size", type=int, default=64)
     sequence.add_argument("--seed", type=int, default=0)
@@ -387,6 +397,130 @@ def _repository_commit(root: Path) -> str:
         text=True,
     )
     return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
+def _sequence_manifest_contract(manifest: Mapping[str, object]) -> dict[str, object]:
+    """Return the immutable contract shared by every continuation generation."""
+
+    settings = manifest.get("settings")
+    if not isinstance(settings, Mapping):
+        raise TypeError("training sequence manifest has no settings contract")
+    immutable_settings = {
+        key: value for key, value in settings.items() if key != "search_iterations"
+    }
+    return {
+        "objective": manifest.get("objective"),
+        "target_schema": manifest.get("target_schema"),
+        "boards_sha256": manifest.get("boards_sha256"),
+        "catalog_sha256": manifest.get("catalog_sha256"),
+        "rules_sha256": manifest.get("rules_sha256"),
+        "simulator": manifest.get("simulator"),
+        "settings": immutable_settings,
+    }
+
+
+def _completed_iteration_records(root: Path) -> list[dict[str, object]]:
+    """Load the longest contiguous set of atomically completed iterations."""
+
+    by_iteration: dict[int, dict[str, object]] = {}
+    summary_path = root / "summary.json"
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        for record in summary.get("iterations", []):
+            if isinstance(record, dict) and isinstance(record.get("iteration"), int):
+                by_iteration[int(record["iteration"])] = record
+
+    state_dir = root / "iteration-state"
+    if state_dir.exists():
+        for path in sorted(state_dir.glob("*.json")):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or not isinstance(record.get("iteration"), int):
+                raise TypeError(f"invalid completed iteration record: {path}")
+            by_iteration[int(record["iteration"])] = record
+
+    records: list[dict[str, object]] = []
+    for iteration in range(1, max(by_iteration, default=0) + 1):
+        if iteration not in by_iteration:
+            raise ValueError(f"training iteration history has a gap before iteration {iteration}")
+        records.append(by_iteration[iteration])
+    return records
+
+
+def _prepare_sequence_manifest(
+    path: Path,
+    desired: dict[str, object],
+    *,
+    requested_iterations: int,
+    completed_iterations: int,
+) -> dict[str, object]:
+    """Create, migrate, or extend a sequence manifest without weakening its contract."""
+
+    if requested_iterations < 1:
+        raise ValueError("search iterations must be positive")
+    if requested_iterations < completed_iterations:
+        raise ValueError(
+            f"this workdir already completed {completed_iterations} search iterations; "
+            f"--search-iterations cannot be reduced to {requested_iterations}"
+        )
+
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        existing_format = existing.get("format")
+        supported = {TRAINING_SEQUENCE_FORMAT, *LEGACY_TRAINING_SEQUENCE_FORMATS}
+        if existing_format not in supported:
+            raise ValueError(f"unsupported training sequence format in {path}")
+        if _sequence_manifest_contract(existing) != _sequence_manifest_contract(desired):
+            raise ValueError(
+                f"training sequence inputs or immutable settings changed in {path.parent}; "
+                "use a new workdir"
+            )
+        budget = existing.get("continuation")
+        prior_request = int(
+            budget.get("requested_search_iterations", 0)
+            if isinstance(budget, Mapping)
+            else existing["settings"].get("search_iterations", 0)
+        )
+        if requested_iterations < prior_request:
+            raise ValueError(
+                f"this workdir already targets {prior_request} search iterations; "
+                f"--search-iterations cannot be reduced to {requested_iterations}"
+            )
+        manifest = dict(existing)
+        manifest["format"] = TRAINING_SEQUENCE_FORMAT
+        manifest.setdefault("created_with", {
+            "source_sha256": existing.get("source_sha256"),
+            "repository_commit": existing.get("repository_commit"),
+        })
+    else:
+        manifest = dict(desired)
+        manifest["format"] = TRAINING_SEQUENCE_FORMAT
+        manifest["created_with"] = {
+            "source_sha256": desired.get("source_sha256"),
+            "repository_commit": desired.get("repository_commit"),
+        }
+
+    versions = manifest.setdefault("code_versions", [])
+    created_version = manifest["created_with"]
+    if created_version not in versions:
+        versions.append(created_version)
+    code_version = {
+        "source_sha256": desired.get("source_sha256"),
+        "repository_commit": desired.get("repository_commit"),
+    }
+    if code_version not in versions:
+        versions.append(code_version)
+    initial_request = int(manifest["settings"].get("search_iterations", requested_iterations))
+    manifest["continuation"] = {
+        "initial_search_iterations": int(
+            manifest.get("continuation", {}).get(
+                "initial_search_iterations", initial_request
+            )
+        ),
+        "requested_search_iterations": requested_iterations,
+        "completed_search_iterations": completed_iterations,
+    }
+    _atomic_json(path, manifest)
+    return manifest
 
 
 def _generate_episode_dataset(
@@ -629,16 +763,16 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
 
         return report
 
-    if args.search_iterations < 1:
-        raise ValueError("search iterations must be positive")
     root = Path(args.workdir)
     root.mkdir(parents=True, exist_ok=True)
+    completed_iteration_records = _completed_iteration_records(root)
+    completed_iterations = len(completed_iteration_records)
     emit("sequence", f"starting iterative policy improvement in {root}")
     boards = load_opponent_boards(args.boards, catalog, args.pack)
     boards_sha256 = _file_sha256(args.boards)
     simulator = BattleSimulator(catalog)
     sequence_manifest = {
-        "format": "sapai-training-sequence-v4",
+        "format": TRAINING_SEQUENCE_FORMAT,
         "objective": VALUE_OBJECTIVE,
         "target_schema": POLICY_TARGET_SCHEMA,
         "boards_sha256": boards_sha256,
@@ -682,23 +816,28 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         },
     }
     sequence_manifest_path = root / "sequence-manifest.json"
-    if sequence_manifest_path.exists():
-        existing_sequence = json.loads(
-            sequence_manifest_path.read_text(encoding="utf-8")
-        )
-        if existing_sequence != sequence_manifest:
-            raise ValueError(
-                f"training sequence inputs or code changed in {root}; use a new workdir"
-            )
-    else:
+    if not sequence_manifest_path.exists():
         existing_outputs = [
             path for path in root.iterdir() if path.name != sequence_manifest_path.name
         ]
         if existing_outputs:
             raise ValueError(
-                f"legacy or unversioned training outputs found in {root}; use a new v4 workdir"
+                f"legacy or unversioned training outputs found in {root}; "
+                "use a new versioned workdir"
             )
-        _atomic_json(sequence_manifest_path, sequence_manifest)
+    _prepare_sequence_manifest(
+        sequence_manifest_path,
+        sequence_manifest,
+        requested_iterations=args.search_iterations,
+        completed_iterations=completed_iterations,
+    )
+    if completed_iterations:
+        emit(
+            "sequence",
+            "continuing completed training history",
+            completed=completed_iterations,
+            total=args.search_iterations,
+        )
     populations = split_opponent_populations(
         boards,
         version=args.board_version,
@@ -753,17 +892,28 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         else None,
     )
     policy_dir = root / "policy-model"
-    bootstrap_summary = train_policy_model(
-        bootstrap_path,
-        policy_dir,
-        training_config=_training_config(args, epochs=args.bootstrap_epochs),
-        progress=training_progress("bootstrap-training"),
+    prior_summary_path = root / "summary.json"
+    prior_summary = (
+        json.loads(prior_summary_path.read_text(encoding="utf-8"))
+        if prior_summary_path.exists()
+        else {}
     )
+    if completed_iterations and isinstance(prior_summary.get("bootstrap_training"), dict):
+        bootstrap_summary = prior_summary["bootstrap_training"]
+        emit("bootstrap-training", "reusing the completed bootstrap checkpoint")
+    else:
+        bootstrap_summary = train_policy_model(
+            bootstrap_path,
+            policy_dir,
+            training_config=_training_config(args, epochs=args.bootstrap_epochs),
+            progress=training_progress("bootstrap-training"),
+        )
 
     evaluation_dir = root / "evaluations"
     evaluation_dir.mkdir(parents=True, exist_ok=True)
     best_weights = policy_dir / "best-policy.weights.h5"
     best_path = evaluation_dir / "best.json"
+    current_source_hash = str(sequence_manifest["source_sha256"])
 
     def evaluate_checkpoint(
         population: OpponentPopulation,
@@ -820,10 +970,18 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             )
         return evaluated
 
-    bootstrap_evaluation_path = evaluation_dir / "bootstrap.json"
+    bootstrap_evaluation_path = (
+        evaluation_dir / f"bootstrap-{current_source_hash[:12]}.json"
+    )
+    historical_bootstrap_paths = list(evaluation_dir.glob("bootstrap*.json"))
     if bootstrap_evaluation_path.exists():
         bootstrap_evaluation = json.loads(
             bootstrap_evaluation_path.read_text(encoding="utf-8")
+        )
+    elif best_path.exists() and historical_bootstrap_paths:
+        historical_bootstrap_path = min(historical_bootstrap_paths)
+        bootstrap_evaluation = json.loads(
+            historical_bootstrap_path.read_text(encoding="utf-8")
         )
     else:
         bootstrap_evaluation = evaluate_checkpoint(
@@ -846,12 +1004,43 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             "stage": "bootstrap",
             "score": list(_policy_evaluation_score(bootstrap_evaluation)),
             "weights_sha256": _file_sha256(best_weights),
+            "evaluation_source_sha256": sequence_manifest["source_sha256"],
         }
         _atomic_json(best_path, best)
 
-    search_paths: list[Path] = []
-    iterations: list[dict[str, object]] = []
-    for iteration in range(1, args.search_iterations + 1):
+    if best.get("evaluation_source_sha256") != current_source_hash:
+        incumbent_path = evaluation_dir / (
+            f"incumbent-{current_source_hash[:12]}-"
+            f"{str(best['weights_sha256'])[:16]}.json"
+        )
+        if incumbent_path.exists():
+            incumbent_evaluation = json.loads(incumbent_path.read_text(encoding="utf-8"))
+        else:
+            emit("validation", "rebasing the incumbent checkpoint under current code")
+            incumbent_evaluation = evaluate_checkpoint(
+                populations.validation,
+                weights=best_weights,
+                episodes=args.validation_episodes,
+                seed=args.seed + 500_000,
+                include_heuristic=False,
+            )
+            _atomic_json(incumbent_path, incumbent_evaluation)
+        best = {
+            **best,
+            "score": list(_policy_evaluation_score(incumbent_evaluation)),
+            "evaluation_source_sha256": current_source_hash,
+        }
+        _atomic_json(best_path, best)
+
+    search_paths = [
+        root / f"arena-search-{iteration:02d}.jsonl"
+        for iteration in range(1, completed_iterations + 1)
+    ]
+    for path in search_paths:
+        if not path.exists():
+            raise ValueError(f"completed training history is missing {path}")
+    iterations = list(completed_iteration_records)
+    for iteration in range(completed_iterations + 1, args.search_iterations + 1):
         stage = f"search-{iteration}"
         search_path = root / f"arena-search-{iteration:02d}.jsonl"
         search_paths.append(search_path)
@@ -926,7 +1115,9 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             resume=True,
             progress=training_progress(f"distillation-{iteration}"),
         )
-        evaluation_path = evaluation_dir / f"iteration-{iteration:02d}.json"
+        evaluation_path = evaluation_dir / (
+            f"iteration-{iteration:02d}-{current_source_hash[:12]}.json"
+        )
         if evaluation_path.exists():
             evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
         else:
@@ -940,45 +1131,69 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             _atomic_json(evaluation_path, evaluation)
         candidate_score = _policy_evaluation_score(evaluation)
         best_score = tuple(float(item) for item in best["score"])
-        promoted = candidate_score > best_score
-        if promoted:
+        already_promoted = best.get("stage") == f"iteration-{iteration}"
+        promoted = already_promoted or candidate_score > best_score
+        if promoted and not already_promoted:
             _atomic_copy(policy_dir / "policy.weights.h5", best_weights)
             best = {
                 "stage": f"iteration-{iteration}",
                 "score": list(candidate_score),
                 "weights_sha256": _file_sha256(best_weights),
+                "evaluation_source_sha256": current_source_hash,
             }
             _atomic_json(best_path, best)
-        iterations.append(
-            {
-                "iteration": iteration,
-                "search_decisions": search_decisions,
-                "replay_decisions": replay_decisions,
-                "training": training_summary,
-                "validation": evaluation,
-                "promoted": promoted,
-            }
+        iteration_record = {
+            "iteration": iteration,
+            "search_decisions": search_decisions,
+            "replay_decisions": replay_decisions,
+            "training": training_summary,
+            "validation": evaluation,
+            "promoted": promoted,
+            "best_after_iteration": dict(best),
+        }
+        _atomic_json(
+            root / "iteration-state" / f"{iteration:06d}.json",
+            iteration_record,
+        )
+        iterations.append(iteration_record)
+        _prepare_sequence_manifest(
+            sequence_manifest_path,
+            sequence_manifest,
+            requested_iterations=args.search_iterations,
+            completed_iterations=iteration,
         )
         emit(stage, "iteration evaluated and checkpoint gate applied")
 
     _atomic_copy(best_weights, policy_dir / "policy.weights.h5")
-    final_test_path = evaluation_dir / "test.json"
+    best_hash = str(best["weights_sha256"])
+    final_test_path = evaluation_dir / (
+        f"test-{current_source_hash[:12]}-{best_hash[:16]}.json"
+    )
     if final_test_path.exists():
         final_test = json.loads(final_test_path.read_text(encoding="utf-8"))
     else:
-        final_test = evaluate_checkpoint(
-            populations.test,
-            weights=best_weights,
-            episodes=args.test_episodes,
-            seed=args.seed + 600_000,
-            include_heuristic=True,
-        )
+        legacy_test_path = evaluation_dir / "test.json"
+        if (
+            legacy_test_path.exists()
+            and prior_summary.get("best", {}).get("weights_sha256") == best_hash
+            and prior_summary.get("source_sha256") == current_source_hash
+        ):
+            final_test = json.loads(legacy_test_path.read_text(encoding="utf-8"))
+        else:
+            final_test = evaluate_checkpoint(
+                populations.test,
+                weights=best_weights,
+                episodes=args.test_episodes,
+                seed=args.seed + 600_000,
+                include_heuristic=True,
+            )
         _atomic_json(final_test_path, final_test)
     summary = {
-        "format": "sapai-training-sequence-v4",
+        "format": TRAINING_SEQUENCE_FORMAT,
         "objective": VALUE_OBJECTIVE,
         "target_schema": POLICY_TARGET_SCHEMA,
         "boards_sha256": boards_sha256,
+        "source_sha256": current_source_hash,
         "population_split": {
             "version": populations.version,
             "counts": populations.board_counts,
@@ -991,6 +1206,8 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         "bootstrap_decisions": bootstrap_decisions,
         "bootstrap_training": bootstrap_summary,
         "bootstrap_validation": bootstrap_evaluation,
+        "requested_search_iterations": args.search_iterations,
+        "completed_search_iterations": len(iterations),
         "iterations": iterations,
         "best": best,
         "final_test": final_test,

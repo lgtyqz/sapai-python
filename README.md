@@ -325,20 +325,46 @@ policy checkpoints, final and best weights, training histories, resumable
 per-episode rollout files, replay mixtures, held-out evaluations, and a final
 `summary.json`.
 
+`--search-iterations` is a monotonic total, not an amount of disposable work.
+After the example above finishes iteration 3, run the same command against the
+same workdir with `--search-iterations 6` to append iterations 4 through 6. The
+continuation keeps the TensorFlow model and optimizer checkpoint, the promoted
+best policy, bootstrap coverage, and prior search trajectories. Each new replay
+mixture contains the latest trajectories plus bounded samples from older search
+and bootstrap data, so training does not immediately forget earlier behavior.
+Completed iterations have atomic records under `iteration-state/`; rerunning a
+target after a disconnect resumes it rather than adding another batch.
+
+The target cannot be lowered. All other sequence settings remain immutable,
+including the board hash, catalog/rules, split, seed, model/training contract,
+and per-iteration rollout settings. Repository revisions are recorded in the
+manifest as provenance and may change while the model and target schemas remain
+compatible. On a new source revision, the incumbent checkpoint and held-out test
+result are reevaluated under that revision before checkpoint gating continues;
+stale scores are never compared to a new candidate. A schema-breaking change
+still requires a new workdir.
+
 After a Colab disconnect, reconnect with the same `DRIVE_RUN_DIR`, board export,
-seed, and data-generation counts. Rerunning `train-sequence` reuses completed
-datasets and rollout episodes and restores model plus optimizer state from the
-latest epoch checkpoint. Only an epoch interrupted before its checkpoint is
-repeated.
+seed, data-generation counts, and total search-iteration target. Rerunning
+`train-sequence` reuses completed datasets and rollout episodes and restores
+model plus optimizer state from the latest epoch checkpoint. Only an epoch
+interrupted before its checkpoint is repeated. To continue after a completed
+run, increase `TARGET_SEARCH_ITERATIONS` in the notebook.
+
+For Kaggle, save the completed notebook version, attach that version's output to
+the next notebook, set `KAGGLE_PRIOR_RUN_DIR`, and increase
+`TARGET_SEARCH_ITERATIONS`. The notebook copies the prior run into
+`/kaggle/working` before appending new iterations; save the new output again to
+form the next link in the training chain.
 
 The v4 target schema and entity-conditioned action head are intentionally not
-checkpoint-compatible with earlier runs. V4 keeps the corrected first-play
-value scale, groups concrete action variants during policy choice, restores
-intentional positive-gold `END_TURN`, and records the chosen action for rollout
-diagnostics. Preserve old artifacts and choose a fresh run directory. Immutable
-manifests reject changed board hashes, source, rules, model contracts, and
-training settings instead of partially restoring. Subsequent interruptions of
-an unchanged v4 run resume normally.
+checkpoint-compatible with pre-v4 runs. V4 keeps the corrected first-play value
+scale, groups concrete action variants during policy choice, restores intentional
+positive-gold `END_TURN`, and records the chosen action for rollout diagnostics.
+An existing compatible v4 training sequence is migrated in place to the v5
+continuation manifest; model weights and targets remain v4. Immutable manifests
+still reject changed board hashes, rules, model contracts, and training settings
+instead of partially restoring incompatible state.
 
 Keras optimizer slots are built before checkpoint restoration so model tensors
 tracked through Keras 3 optimizers are matched immediately. Each newly completed
