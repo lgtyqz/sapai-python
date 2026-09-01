@@ -406,7 +406,9 @@ def _sequence_manifest_contract(manifest: Mapping[str, object]) -> dict[str, obj
     if not isinstance(settings, Mapping):
         raise TypeError("training sequence manifest has no settings contract")
     immutable_settings = {
-        key: value for key, value in settings.items() if key != "search_iterations"
+        key: value
+        for key, value in settings.items()
+        if key not in {"search_iterations", "seed"}
     }
     return {
         "objective": manifest.get("objective"),
@@ -415,8 +417,43 @@ def _sequence_manifest_contract(manifest: Mapping[str, object]) -> dict[str, obj
         "catalog_sha256": manifest.get("catalog_sha256"),
         "rules_sha256": manifest.get("rules_sha256"),
         "simulator": manifest.get("simulator"),
+        "population_seed": manifest.get("population_seed", settings.get("seed")),
         "settings": immutable_settings,
     }
+
+
+def _contract_differences(
+    previous: object,
+    current: object,
+    *,
+    path: str = "",
+) -> list[str]:
+    """Describe nested manifest differences without hiding the incompatible field."""
+
+    if isinstance(previous, Mapping) and isinstance(current, Mapping):
+        differences: list[str] = []
+        for key in sorted(set(previous) | set(current)):
+            child_path = f"{path}.{key}" if path else str(key)
+            if key not in previous:
+                differences.append(
+                    f"{child_path}: previous=<missing>, current={current[key]!r}"
+                )
+            elif key not in current:
+                differences.append(
+                    f"{child_path}: previous={previous[key]!r}, current=<missing>"
+                )
+            else:
+                differences.extend(
+                    _contract_differences(
+                        previous[key],
+                        current[key],
+                        path=child_path,
+                    )
+                )
+        return differences
+    if previous != current:
+        return [f"{path}: previous={previous!r}, current={current!r}"]
+    return []
 
 
 def _completed_iteration_records(root: Path) -> list[dict[str, object]]:
@@ -469,10 +506,18 @@ def _prepare_sequence_manifest(
         supported = {TRAINING_SEQUENCE_FORMAT, *LEGACY_TRAINING_SEQUENCE_FORMATS}
         if existing_format not in supported:
             raise ValueError(f"unsupported training sequence format in {path}")
-        if _sequence_manifest_contract(existing) != _sequence_manifest_contract(desired):
+        existing_contract = _sequence_manifest_contract(existing)
+        desired_for_contract = dict(desired)
+        desired_for_contract.setdefault(
+            "population_seed", existing_contract["population_seed"]
+        )
+        desired_contract = _sequence_manifest_contract(desired_for_contract)
+        differences = _contract_differences(existing_contract, desired_contract)
+        if differences:
+            formatted = "\n".join(f"  - {difference}" for difference in differences)
             raise ValueError(
                 f"training sequence inputs or immutable settings changed in {path.parent}; "
-                "use a new workdir"
+                f"use a new workdir or restore the original inputs/settings:\n{formatted}"
             )
         budget = existing.get("continuation")
         prior_request = int(
@@ -487,6 +532,7 @@ def _prepare_sequence_manifest(
             )
         manifest = dict(existing)
         manifest["format"] = TRAINING_SEQUENCE_FORMAT
+        manifest.setdefault("population_seed", existing_contract["population_seed"])
         manifest.setdefault("created_with", {
             "source_sha256": existing.get("source_sha256"),
             "repository_commit": existing.get("repository_commit"),
@@ -509,6 +555,13 @@ def _prepare_sequence_manifest(
     }
     if code_version not in versions:
         versions.append(code_version)
+    run_seeds = manifest.setdefault("run_seeds", [])
+    initial_seed = manifest["settings"].get("seed")
+    if initial_seed not in run_seeds:
+        run_seeds.append(initial_seed)
+    requested_seed = desired["settings"].get("seed")
+    if requested_seed not in run_seeds:
+        run_seeds.append(requested_seed)
     initial_request = int(manifest["settings"].get("search_iterations", requested_iterations))
     manifest["continuation"] = {
         "initial_search_iterations": int(
@@ -518,6 +571,7 @@ def _prepare_sequence_manifest(
         ),
         "requested_search_iterations": requested_iterations,
         "completed_search_iterations": completed_iterations,
+        "current_seed": requested_seed,
     }
     _atomic_json(path, manifest)
     return manifest
@@ -771,6 +825,16 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     boards = load_opponent_boards(args.boards, catalog, args.pack)
     boards_sha256 = _file_sha256(args.boards)
     simulator = BattleSimulator(catalog)
+    sequence_manifest_path = root / "sequence-manifest.json"
+    population_seed = args.seed
+    if sequence_manifest_path.exists():
+        stored_manifest = json.loads(sequence_manifest_path.read_text(encoding="utf-8"))
+        stored_settings = stored_manifest.get("settings")
+        if not isinstance(stored_settings, Mapping):
+            raise TypeError("training sequence manifest has no settings contract")
+        population_seed = int(
+            stored_manifest.get("population_seed", stored_settings.get("seed", args.seed))
+        )
     sequence_manifest = {
         "format": TRAINING_SEQUENCE_FORMAT,
         "objective": VALUE_OBJECTIVE,
@@ -791,6 +855,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             "max_events": simulator.MAX_EVENTS,
             "record_training_trace": False,
         },
+        "population_seed": population_seed,
         "settings": {
             key: getattr(args, key)
             for key in (
@@ -815,7 +880,6 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             )
         },
     }
-    sequence_manifest_path = root / "sequence-manifest.json"
     if not sequence_manifest_path.exists():
         existing_outputs = [
             path for path in root.iterdir() if path.name != sequence_manifest_path.name
@@ -843,11 +907,14 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         version=args.board_version,
         validation_fraction=args.validation_fraction,
         test_fraction=args.test_fraction,
-        seed=args.seed,
+        seed=population_seed,
     )
     emit(
         "population",
-        f"prepared replay-safe populations for patch {populations.version}",
+        (
+            f"prepared replay-safe populations for patch {populations.version}; "
+            f"split seed={population_seed}, run seed={args.seed}"
+        ),
     )
 
     bootstrap_path = root / "arena-bootstrap.jsonl"
@@ -870,7 +937,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         episodes=args.bootstrap_episodes,
         pack=args.pack,
         version=populations.version,
-        seed=args.seed,
+        seed=population_seed,
         identity={
             "policy": "heuristic-exploration-mixture",
             "exploration_probability": args.bootstrap_exploration,
@@ -914,6 +981,22 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     best_weights = policy_dir / "best-policy.weights.h5"
     best_path = evaluation_dir / "best.json"
     current_source_hash = str(sequence_manifest["source_sha256"])
+    evaluation_contract_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "source_sha256": current_source_hash,
+                "population_seed": population_seed,
+                "run_seed": args.seed,
+                "validation_episodes": args.validation_episodes,
+                "test_episodes": args.test_episodes,
+                "search_simulations": args.search_simulations,
+                "search_candidates": args.search_candidates,
+                "battle_evaluation_simulations": args.battle_evaluation_simulations,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
     def evaluate_checkpoint(
         population: OpponentPopulation,
@@ -971,7 +1054,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         return evaluated
 
     bootstrap_evaluation_path = (
-        evaluation_dir / f"bootstrap-{current_source_hash[:12]}.json"
+        evaluation_dir / f"bootstrap-{evaluation_contract_hash[:12]}.json"
     )
     historical_bootstrap_paths = list(evaluation_dir.glob("bootstrap*.json"))
     if bootstrap_evaluation_path.exists():
@@ -1005,18 +1088,22 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             "score": list(_policy_evaluation_score(bootstrap_evaluation)),
             "weights_sha256": _file_sha256(best_weights),
             "evaluation_source_sha256": sequence_manifest["source_sha256"],
+            "evaluation_contract_sha256": evaluation_contract_hash,
         }
         _atomic_json(best_path, best)
 
-    if best.get("evaluation_source_sha256") != current_source_hash:
+    if best.get("evaluation_contract_sha256") != evaluation_contract_hash:
         incumbent_path = evaluation_dir / (
-            f"incumbent-{current_source_hash[:12]}-"
+            f"incumbent-{evaluation_contract_hash[:12]}-"
             f"{str(best['weights_sha256'])[:16]}.json"
         )
         if incumbent_path.exists():
             incumbent_evaluation = json.loads(incumbent_path.read_text(encoding="utf-8"))
         else:
-            emit("validation", "rebasing the incumbent checkpoint under current code")
+            emit(
+                "validation",
+                "rebasing the incumbent checkpoint under the current code and seed",
+            )
             incumbent_evaluation = evaluate_checkpoint(
                 populations.validation,
                 weights=best_weights,
@@ -1029,6 +1116,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             **best,
             "score": list(_policy_evaluation_score(incumbent_evaluation)),
             "evaluation_source_sha256": current_source_hash,
+            "evaluation_contract_sha256": evaluation_contract_hash,
         }
         _atomic_json(best_path, best)
 
@@ -1116,7 +1204,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
             progress=training_progress(f"distillation-{iteration}"),
         )
         evaluation_path = evaluation_dir / (
-            f"iteration-{iteration:02d}-{current_source_hash[:12]}.json"
+            f"iteration-{iteration:02d}-{evaluation_contract_hash[:12]}.json"
         )
         if evaluation_path.exists():
             evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
@@ -1140,6 +1228,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
                 "score": list(candidate_score),
                 "weights_sha256": _file_sha256(best_weights),
                 "evaluation_source_sha256": current_source_hash,
+                "evaluation_contract_sha256": evaluation_contract_hash,
             }
             _atomic_json(best_path, best)
         iteration_record = {
@@ -1167,7 +1256,7 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     _atomic_copy(best_weights, policy_dir / "policy.weights.h5")
     best_hash = str(best["weights_sha256"])
     final_test_path = evaluation_dir / (
-        f"test-{current_source_hash[:12]}-{best_hash[:16]}.json"
+        f"test-{evaluation_contract_hash[:12]}-{best_hash[:16]}.json"
     )
     if final_test_path.exists():
         final_test = json.loads(final_test_path.read_text(encoding="utf-8"))
@@ -1176,7 +1265,8 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         if (
             legacy_test_path.exists()
             and prior_summary.get("best", {}).get("weights_sha256") == best_hash
-            and prior_summary.get("source_sha256") == current_source_hash
+            and prior_summary.get("evaluation_contract_sha256")
+            == evaluation_contract_hash
         ):
             final_test = json.loads(legacy_test_path.read_text(encoding="utf-8"))
         else:
@@ -1194,10 +1284,13 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
         "target_schema": POLICY_TARGET_SCHEMA,
         "boards_sha256": boards_sha256,
         "source_sha256": current_source_hash,
+        "evaluation_contract_sha256": evaluation_contract_hash,
+        "run_seed": args.seed,
         "population_split": {
             "version": populations.version,
             "counts": populations.board_counts,
             "unit": "replay_id",
+            "seed": population_seed,
         },
         "battle_evaluation": {
             "kind": "native-simulator-common-panel",

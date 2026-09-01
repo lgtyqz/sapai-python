@@ -183,7 +183,8 @@ the notebook frontend blocks output JavaScript.
 To continue from a saved Kaggle notebook version, attach that version as an
 input. A blank `KAGGLE_PRIOR_RUN_DIR` automatically finds a unique training run
 under `/kaggle/input`, preferring the directory name configured by
-`KAGGLE_RUN_DIR`; set it explicitly only when multiple runs are attached.
+`KAGGLE_RUN_DIR` and excluding commit-specific smoke-test runs; set it explicitly
+only when multiple full runs are attached.
 `KAGGLE_PRIOR_HUMAN_DIR` remains explicit. The notebook validates the sequence
 manifest, model manifest, and checkpoint directory before copying anything into
 writable storage, without replacing a newer in-session directory. Enable
@@ -338,18 +339,23 @@ and bootstrap data, so training does not immediately forget earlier behavior.
 Completed iterations have atomic records under `iteration-state/`; rerunning a
 target after a disconnect resumes it rather than adding another batch.
 
-The target cannot be lowered. All other sequence settings remain immutable,
-including the board hash, catalog/rules, split, seed, model/training contract,
-and per-iteration rollout settings. Repository revisions are recorded in the
-manifest as provenance and may change while the model and target schemas remain
-compatible. On a new source revision, the incumbent checkpoint and held-out test
-result are reevaluated under that revision before checkpoint gating continues;
-stale scores are never compared to a new candidate. A schema-breaking change
-still requires a new workdir.
+The target cannot be lowered. The board hash, catalog/rules, population split,
+model/training contract, and per-iteration rollout settings remain immutable.
+The initial seed stays pinned as the population-split seed, but a later completed
+generation may continue with a different run seed. New rollout and training
+randomness use that seed, seed history is audited in both manifests, and the
+incumbent plus held-out evaluation are recomputed before gating. Do not change
+the seed while an individual iteration is only partially complete. Repository
+revisions are recorded in the manifest as provenance and may change while the
+model and target schemas remain compatible. On a new source revision, the
+incumbent checkpoint and held-out test result are reevaluated under that revision
+before checkpoint gating continues; stale scores are never compared to a new
+candidate. A schema-breaking change still requires a new workdir.
 
 After a Colab disconnect, reconnect with the same `DRIVE_RUN_DIR`, board export,
-seed, data-generation counts, and total search-iteration target. Rerunning
-`train-sequence` reuses completed datasets and rollout episodes and restores
+data-generation counts, total search-iteration target, and—if an iteration was
+interrupted—seed. Rerunning `train-sequence` reuses completed datasets and
+rollout episodes and restores
 model plus optimizer state from the latest epoch checkpoint. Only an epoch
 interrupted before its checkpoint is repeated. To continue after a completed
 run, increase `TARGET_SEARCH_ITERATIONS` in the notebook.

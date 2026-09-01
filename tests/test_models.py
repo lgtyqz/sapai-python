@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ except ModuleNotFoundError:
 
 from sapai.ml.encoding import encode_states, encode_teams
 from sapai.ml.models import BattleModel, ModelConfig, PolicyValueModel, PolicyValueTrainer
-from sapai.ml.pipelines import _restore_training_checkpoint
+from sapai.ml.pipelines import TrainingConfig, _restore_training_checkpoint, _write_run_metadata
 from sapai.ml.training import BattleTrainer
 from sapai.sim.actions import ActionKind
 from sapai.sim.models import Shop, ShopPet, Team
@@ -183,6 +184,65 @@ class TensorFlowModelTest(unittest.TestCase):
             expected, target_model.trainable_variables, strict=True
         ):
             np.testing.assert_allclose(restored_value.numpy(), expected_value)
+
+    def test_model_run_metadata_allows_and_audits_training_seed_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "training.jsonl"
+            dataset.write_text("test\n", encoding="utf-8")
+            output = root / "model"
+            _write_run_metadata(
+                output,
+                kind="policy-value",
+                training=TrainingConfig(seed=7),
+                model=self.config,
+                dataset_paths=[dataset],
+            )
+            _write_run_metadata(
+                output,
+                kind="policy-value",
+                training=TrainingConfig(seed=8),
+                model=self.config,
+                dataset_paths=[dataset],
+            )
+            manifest = json.loads((output / "run-manifest.json").read_text())
+
+        self.assertNotIn("seed", manifest["training_contract"])
+        self.assertEqual(manifest["training_seeds"], [7, 8])
+        self.assertEqual([entry["seed"] for entry in manifest["datasets"]], [7, 8])
+
+    def test_legacy_model_manifest_preserves_its_seed_during_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "training.jsonl"
+            dataset.write_text("test\n", encoding="utf-8")
+            output = root / "model"
+            _write_run_metadata(
+                output,
+                kind="policy-value",
+                training=TrainingConfig(seed=7),
+                model=self.config,
+                dataset_paths=[dataset],
+            )
+            manifest_path = output / "run-manifest.json"
+            legacy = json.loads(manifest_path.read_text())
+            legacy["training_contract"]["seed"] = 7
+            legacy.pop("training_seeds")
+            for entry in legacy["datasets"]:
+                entry.pop("seed")
+            manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+            _write_run_metadata(
+                output,
+                kind="policy-value",
+                training=TrainingConfig(seed=8),
+                model=self.config,
+                dataset_paths=[dataset],
+            )
+            migrated = json.loads(manifest_path.read_text())
+
+        self.assertEqual(migrated["training_seeds"], [7, 8])
+        self.assertEqual([entry["seed"] for entry in migrated["datasets"]], [7, 8])
 
 
 if __name__ == "__main__":

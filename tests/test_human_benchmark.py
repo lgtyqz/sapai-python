@@ -761,7 +761,13 @@ class HumanArenaSessionTest(unittest.TestCase):
             (run / "summary.json").write_text(
                 json.dumps({"completed_search_iterations": 3}), encoding="utf-8"
             )
-            destination = root / "working" / "policy-improvement-v4-001"
+            smoke = input_root / "saved-output" / "sapai-runs" / "run-smoke-deadbeef"
+            (smoke / "policy-model" / "checkpoints").mkdir(parents=True)
+            (smoke / "sequence-manifest.json").write_text("{}", encoding="utf-8")
+            (smoke / "policy-model" / "run-manifest.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            destination = root / "working" / "continued-run"
             namespace = {
                 "Path": Path,
                 "json": json,

@@ -98,9 +98,11 @@ class CliWorkflowTest(unittest.TestCase):
                 requested_iterations=3,
                 completed_iterations=3,
             )
+            next_generation = manifest("source-b", "commit-b", 6)
+            next_generation["settings"]["seed"] = 8
             continued = _prepare_sequence_manifest(
                 path,
-                manifest("source-b", "commit-b", 6),
+                next_generation,
                 requested_iterations=6,
                 completed_iterations=3,
             )
@@ -109,6 +111,8 @@ class CliWorkflowTest(unittest.TestCase):
                 continued["continuation"]["requested_search_iterations"], 6
             )
             self.assertEqual(len(continued["code_versions"]), 2)
+            self.assertEqual(continued["run_seeds"], [7, 8])
+            self.assertEqual(continued["population_seed"], 7)
             with self.assertRaisesRegex(ValueError, "cannot be reduced"):
                 _prepare_sequence_manifest(
                     path,
@@ -116,9 +120,13 @@ class CliWorkflowTest(unittest.TestCase):
                     requested_iterations=5,
                     completed_iterations=3,
                 )
-            with self.assertRaisesRegex(ValueError, "immutable settings changed"):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"immutable settings changed[\s\S]*settings.pack: "
+                r"previous='Turtle', current='Puppy'",
+            ):
                 changed = manifest("source-b", "commit-b", 7)
-                changed["settings"]["seed"] = 8
+                changed["settings"]["pack"] = "Puppy"
                 _prepare_sequence_manifest(
                     path,
                     changed,

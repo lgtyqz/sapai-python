@@ -90,22 +90,31 @@ def _write_run_metadata(
         "objective": VALUE_OBJECTIVE if kind == "policy-value" else "battle-wdl",
         "model": asdict(model),
         "training_contract": {
-            key: value for key, value in training_values.items() if key != "epochs"
+            key: value
+            for key, value in training_values.items()
+            if key not in {"epochs", "seed"}
         },
         "python": f"{sys.version_info.major}.{sys.version_info.minor}",
     }
     manifest_path = output / "run-manifest.json"
+    legacy_training_seed = None
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        existing_immutable = {
-            key: existing.get(key)
-            for key in immutable
-        }
+        existing_immutable = {key: existing.get(key) for key in immutable}
+        existing_training_contract = existing_immutable.get("training_contract")
+        if isinstance(existing_training_contract, dict):
+            legacy_training_seed = existing_training_contract.get("seed")
+            existing_immutable["training_contract"] = {
+                key: value
+                for key, value in existing_training_contract.items()
+                if key != "seed"
+            }
         if existing_immutable != immutable:
             raise ValueError(
                 f"model/checkpoint contract changed in {output}; use a new output directory"
             )
         manifest = existing
+        manifest["training_contract"] = immutable["training_contract"]
     else:
         if (output / "checkpoints").exists() or (output / "config.json").exists():
             raise ValueError(
@@ -113,11 +122,20 @@ def _write_run_metadata(
             )
         manifest = {**immutable, "datasets": []}
     datasets = manifest.setdefault("datasets", [])
+    training_seeds = manifest.setdefault("training_seeds", [])
+    if legacy_training_seed is not None and legacy_training_seed not in training_seeds:
+        training_seeds.append(legacy_training_seed)
+    if legacy_training_seed is not None:
+        for entry in datasets:
+            entry.setdefault("seed", legacy_training_seed)
+    if training.seed not in training_seeds:
+        training_seeds.append(training.seed)
     for path in dataset_paths:
         entry = {
             "path": str(path.resolve()),
             "sha256": _file_sha256(path),
             "target_epochs": training.epochs,
+            "seed": training.seed,
         }
         if entry not in datasets:
             datasets.append(entry)
