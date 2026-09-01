@@ -181,11 +181,14 @@ enhances the team cards, while **Reorder team** remains a complete fallback if
 the notebook frontend blocks output JavaScript.
 
 To continue from a saved Kaggle notebook version, attach that version as an
-input and set `KAGGLE_PRIOR_RUN_DIR` or `KAGGLE_PRIOR_HUMAN_DIR` to the relevant
-directory under `/kaggle/input`. The notebook copies it into writable storage
-without replacing a newer in-session directory. Enable Internet for the Git
-checkout, dependency installation, and database export; an attached
-`boards.jsonl` avoids the database step.
+input. A blank `KAGGLE_PRIOR_RUN_DIR` automatically finds a unique training run
+under `/kaggle/input`, preferring the directory name configured by
+`KAGGLE_RUN_DIR`; set it explicitly only when multiple runs are attached.
+`KAGGLE_PRIOR_HUMAN_DIR` remains explicit. The notebook validates the sequence
+manifest, model manifest, and checkpoint directory before copying anything into
+writable storage, without replacing a newer in-session directory. Enable
+Internet for the Git checkout, dependency installation, and database export; an
+attached `boards.jsonl` avoids the database step.
 
 ## Stable SAP Library data
 
@@ -352,10 +355,10 @@ interrupted before its checkpoint is repeated. To continue after a completed
 run, increase `TARGET_SEARCH_ITERATIONS` in the notebook.
 
 For Kaggle, save the completed notebook version, attach that version's output to
-the next notebook, set `KAGGLE_PRIOR_RUN_DIR`, and increase
-`TARGET_SEARCH_ITERATIONS`. The notebook copies the prior run into
-`/kaggle/working` before appending new iterations; save the new output again to
-form the next link in the training chain.
+the next notebook, and increase `TARGET_SEARCH_ITERATIONS`. The notebook
+auto-detects and copies the prior run into `/kaggle/working` before appending new
+iterations; use `KAGGLE_PRIOR_RUN_DIR` only to resolve multiple candidates. Save
+the new output again to form the next link in the training chain.
 
 The v4 target schema and entity-conditioned action head are intentionally not
 checkpoint-compatible with pre-v4 runs. V4 keeps the corrected first-play value

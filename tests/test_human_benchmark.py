@@ -1,5 +1,6 @@
 import ast
 import json
+import shutil
 import sys
 import tempfile
 import types
@@ -708,6 +709,9 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("RUN_HUMAN_BENCHMARK = False", source)
         self.assertIn("/kaggle/working", source)
         self.assertIn("KAGGLE_PRIOR_RUN_DIR", source)
+        self.assertIn("def training_run_candidates", source)
+        self.assertIn("Training run: auto-detected", source)
+        self.assertIn("restored and validated", source)
         self.assertIn("UserSecretsClient().get_secret('DATABASE_URL')", source)
         self.assertIn("display_human_arena_widget", source)
         self.assertIn("version_on_mismatch=True", source)
@@ -722,6 +726,55 @@ class HumanArenaSessionTest(unittest.TestCase):
             if code.startswith("%pip "):
                 code = "\n".join(code.splitlines()[1:])
             ast.parse(code)
+
+    def test_kaggle_notebook_auto_detects_and_restores_matching_training_run(self):
+        path = Path(__file__).resolve().parents[1] / "notebooks" / "sapai_kaggle_training.ipynb"
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        setup = "".join(notebook["cells"][3]["source"])
+        tree = ast.parse(setup)
+        helper_names = {
+            "training_run_candidates",
+            "describe_training_run",
+            "resolve_training_source",
+            "validate_training_run",
+            "restore_training_output",
+        }
+        helpers = ast.Module(
+            body=[
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in helper_names
+            ],
+            type_ignores=[],
+        )
+        ast.fix_missing_locations(helpers)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_root = root / "input"
+            run = input_root / "saved-output" / "sapai-runs" / "policy-improvement-v4-001"
+            (run / "policy-model" / "checkpoints").mkdir(parents=True)
+            (run / "sequence-manifest.json").write_text("{}", encoding="utf-8")
+            (run / "policy-model" / "run-manifest.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            (run / "summary.json").write_text(
+                json.dumps({"completed_search_iterations": 3}), encoding="utf-8"
+            )
+            destination = root / "working" / "policy-improvement-v4-001"
+            namespace = {
+                "Path": Path,
+                "json": json,
+                "shutil": shutil,
+                "input_root": input_root,
+            }
+            exec(compile(helpers, "kaggle-helpers", "exec"), namespace)  # noqa: S102
+
+            restored = namespace["restore_training_output"]("", str(destination))
+
+            self.assertEqual(restored, destination.resolve())
+            self.assertTrue((destination / "sequence-manifest.json").is_file())
+            self.assertTrue((destination / "policy-model" / "checkpoints").is_dir())
 
 
 if __name__ == "__main__":
