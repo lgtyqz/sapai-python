@@ -11,6 +11,7 @@ from sapai.cli import (
     _generate_episode_dataset,
     _policy_evaluation_score,
     _prepare_sequence_manifest,
+    _resolve_search_iteration_target,
 )
 from sapai.data.datasets import split_boards
 from sapai.data.replay import BoardSnapshot
@@ -190,6 +191,75 @@ class CliWorkflowTest(unittest.TestCase):
 
         self.assertEqual([record["iteration"] for record in records], [1, 2])
         self.assertEqual(records[1]["source"], "atomic-state")
+
+    def test_additional_iterations_append_once_then_resume_the_pending_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "sequence-manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "settings": {"search_iterations": 3},
+                        "continuation": {"requested_search_iterations": 3},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (manifest_path.parent / "summary.json").write_text(
+                json.dumps({"completed_search_iterations": 3}),
+                encoding="utf-8",
+            )
+            appended = _resolve_search_iteration_target(
+                manifest_path,
+                completed_iterations=3,
+                absolute_target=3,
+                additional_iterations=3,
+            )
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "settings": {"search_iterations": 3},
+                        "continuation": {"requested_search_iterations": 6},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            resumed = _resolve_search_iteration_target(
+                manifest_path,
+                completed_iterations=4,
+                absolute_target=3,
+                additional_iterations=3,
+            )
+            finalized_iterations_pending_summary = _resolve_search_iteration_target(
+                manifest_path,
+                completed_iterations=6,
+                absolute_target=3,
+                additional_iterations=3,
+            )
+
+        self.assertEqual(appended, 6)
+        self.assertEqual(resumed, 6)
+        self.assertEqual(finalized_iterations_pending_summary, 6)
+
+    def test_additional_iterations_resume_a_legacy_manifest_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "sequence-manifest.json"
+            manifest_path.write_text(
+                json.dumps({"settings": {"search_iterations": 6}}),
+                encoding="utf-8",
+            )
+            (manifest_path.parent / "summary.json").write_text(
+                json.dumps({"completed_search_iterations": 4}),
+                encoding="utf-8",
+            )
+
+            target = _resolve_search_iteration_target(
+                manifest_path,
+                completed_iterations=4,
+                absolute_target=3,
+                additional_iterations=3,
+            )
+
+        self.assertEqual(target, 6)
 
 
 class DatasetWorkflowTest(unittest.TestCase):

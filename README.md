@@ -329,15 +329,17 @@ policy checkpoints, final and best weights, training histories, resumable
 per-episode rollout files, replay mixtures, held-out evaluations, and a final
 `summary.json`.
 
-`--search-iterations` is a monotonic total, not an amount of disposable work.
-After the example above finishes iteration 3, run the same command against the
-same workdir with `--search-iterations 6` to append iterations 4 through 6. The
-continuation keeps the TensorFlow model and optimizer checkpoint, the promoted
-best policy, bootstrap coverage, and prior search trajectories. Each new replay
-mixture contains the latest trajectories plus bounded samples from older search
-and bootstrap data, so training does not immediately forget earlier behavior.
-Completed iterations have atomic records under `iteration-state/`; rerunning a
-target after a disconnect resumes it rather than adding another batch.
+`--search-iterations` remains an explicit monotonic total for local commands.
+`--additional-search-iterations 3` provides append-style continuation: a run at
+iteration 3 plans a target of 6, while an interrupted run at iteration 4 resumes
+its persisted target of 6 instead of extending again. The notebooks use this
+append form through `SEARCH_ITERATIONS_PER_RUN`, so restoring a completed output
+actually performs new training without manually calculating a total. Continuation
+keeps the TensorFlow model and optimizer checkpoint, promoted best policy,
+bootstrap coverage, and prior search trajectories. Each new replay mixture
+contains the latest trajectories plus bounded samples from older search and
+bootstrap data, so training does not immediately forget earlier behavior.
+Completed iterations have atomic records under `iteration-state/`.
 
 The target cannot be lowered. The board hash, catalog/rules, population split,
 model/training contract, and per-iteration rollout settings remain immutable.
@@ -357,14 +359,14 @@ data-generation counts, total search-iteration target, and—if an iteration was
 interrupted—seed. Rerunning `train-sequence` reuses completed datasets and
 rollout episodes and restores
 model plus optimizer state from the latest epoch checkpoint. Only an epoch
-interrupted before its checkpoint is repeated. To continue after a completed
-run, increase `TARGET_SEARCH_ITERATIONS` in the notebook.
+interrupted before its checkpoint is repeated. Each completed notebook run adds
+`SEARCH_ITERATIONS_PER_RUN` more iterations the next time full training is run.
 
-For Kaggle, save the completed notebook version, attach that version's output to
-the next notebook, and increase `TARGET_SEARCH_ITERATIONS`. The notebook
-auto-detects and copies the prior run into `/kaggle/working` before appending new
-iterations; use `KAGGLE_PRIOR_RUN_DIR` only to resolve multiple candidates. Save
-the new output again to form the next link in the training chain.
+For Kaggle, save the completed notebook version and attach that version's output
+to the next notebook. The notebook auto-detects and copies the prior run into
+`/kaggle/working`, then appends `SEARCH_ITERATIONS_PER_RUN` iterations; use
+`KAGGLE_PRIOR_RUN_DIR` only to resolve multiple candidates. Save the new output
+again to form the next link in the training chain.
 
 The v4 target schema and entity-conditioned action head are intentionally not
 checkpoint-compatible with pre-v4 runs. V4 keeps the corrected first-play value

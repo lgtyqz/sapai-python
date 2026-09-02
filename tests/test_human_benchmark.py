@@ -700,6 +700,8 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("display_human_arena", launcher)
         self.assertIn("version_on_mismatch=True", launcher)
         self.assertIn("'--progress'", source)
+        self.assertIn("SEARCH_ITERATIONS_PER_RUN", source)
+        self.assertIn("'--additional-search-iterations'", source)
         ast.parse(launcher)
 
     def test_kaggle_notebook_is_native_guarded_and_parseable(self):
@@ -716,6 +718,8 @@ class HumanArenaSessionTest(unittest.TestCase):
         self.assertIn("display_human_arena_widget", source)
         self.assertIn("version_on_mismatch=True", source)
         self.assertIn("'--progress'", source)
+        self.assertIn("SEARCH_ITERATIONS_PER_RUN", source)
+        self.assertIn("'--additional-search-iterations'", source)
         self.assertNotIn("anywidget", source.lower())
         self.assertNotIn("google.colab", source)
         self.assertNotIn("/content/", source)

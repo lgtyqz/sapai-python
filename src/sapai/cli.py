@@ -202,6 +202,15 @@ def build_parser() -> argparse.ArgumentParser:
             "continue a completed run"
         ),
     )
+    sequence.add_argument(
+        "--additional-search-iterations",
+        type=int,
+        default=0,
+        help=(
+            "append this many iterations after a completed target; an interrupted "
+            "planned target is resumed instead of extended again"
+        ),
+    )
     sequence.add_argument("--bootstrap-replay-fraction", type=float, default=0.35)
     sequence.add_argument("--batch-size", type=int, default=64)
     sequence.add_argument("--seed", type=int, default=0)
@@ -481,6 +490,51 @@ def _completed_iteration_records(root: Path) -> list[dict[str, object]]:
             raise ValueError(f"training iteration history has a gap before iteration {iteration}")
         records.append(by_iteration[iteration])
     return records
+
+
+def _resolve_search_iteration_target(
+    manifest_path: Path,
+    *,
+    completed_iterations: int,
+    absolute_target: int,
+    additional_iterations: int,
+) -> int:
+    """Resolve an idempotent absolute target from an append-style request."""
+
+    if additional_iterations < 0:
+        raise ValueError("additional search iterations cannot be negative")
+    if additional_iterations == 0:
+        return absolute_target
+
+    pending_target = completed_iterations
+    finalized_iterations = 0
+    summary_path = manifest_path.parent / "summary.json"
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        finalized_iterations = int(
+            summary.get(
+                "completed_search_iterations",
+                len(summary.get("iterations", [])),
+            )
+        )
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        continuation = manifest.get("continuation")
+        if isinstance(continuation, Mapping):
+            pending_target = int(
+                continuation.get("requested_search_iterations", completed_iterations)
+            )
+        else:
+            settings = manifest.get("settings")
+            if isinstance(settings, Mapping):
+                pending_target = int(
+                    settings.get("search_iterations", completed_iterations)
+                )
+    if finalized_iterations < completed_iterations:
+        return max(pending_target, completed_iterations)
+    if pending_target > completed_iterations:
+        return pending_target
+    return completed_iterations + additional_iterations
 
 
 def _prepare_sequence_manifest(
@@ -821,11 +875,26 @@ def _run_training_sequence(args, catalog: Catalog) -> dict[str, object]:
     root.mkdir(parents=True, exist_ok=True)
     completed_iteration_records = _completed_iteration_records(root)
     completed_iterations = len(completed_iteration_records)
+    sequence_manifest_path = root / "sequence-manifest.json"
+    additional_iterations = getattr(args, "additional_search_iterations", 0)
+    args.search_iterations = _resolve_search_iteration_target(
+        sequence_manifest_path,
+        completed_iterations=completed_iterations,
+        absolute_target=args.search_iterations,
+        additional_iterations=additional_iterations,
+    )
     emit("sequence", f"starting iterative policy improvement in {root}")
+    if additional_iterations:
+        emit(
+            "sequence",
+            (
+                f"planned continuation: {completed_iterations} completed, "
+                f"target {args.search_iterations}"
+            ),
+        )
     boards = load_opponent_boards(args.boards, catalog, args.pack)
     boards_sha256 = _file_sha256(args.boards)
     simulator = BattleSimulator(catalog)
-    sequence_manifest_path = root / "sequence-manifest.json"
     population_seed = args.seed
     if sequence_manifest_path.exists():
         stored_manifest = json.loads(sequence_manifest_path.read_text(encoding="utf-8"))
